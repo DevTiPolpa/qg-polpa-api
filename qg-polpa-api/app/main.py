@@ -1,6 +1,19 @@
+import secrets
+import bcrypt
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
 
-from app.database import list_database_tables, test_database_connection, list_table_columns, list_users
+
+from app.database import (
+    list_database_tables,
+    test_database_connection,
+    list_table_columns,
+    list_users,
+    update_user,
+    create_user,
+    reset_user_password,
+)
 
 
 app = FastAPI(
@@ -8,6 +21,39 @@ app = FastAPI(
     description="API RESTful para integração do QG Polpa Brasil com SQL Server.",
     version="0.1.0",
 )
+
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+ )
+
+class UserUpdateRequest(BaseModel):
+    name: str | None = Field(default=None, min_length=2)
+    role: str | None = None
+    ativo: bool | None = None
+
+class UserCreateRequest(BaseModel):
+    name: str = Field(min_length=2)
+    email: str = Field(min_length=5)
+    role: str
+
+
+def generate_random_password(length: int = 10) -> str:
+    chars = "ABCDEFGHJKMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789"
+    return "".join(secrets.choice(chars) for _ in range(length))
+
+
+def hash_password(password: str) -> str:
+    password_bytes = password.encode("utf-8")
+    hashed = bcrypt.hashpw(password_bytes, bcrypt.gensalt(rounds=12))
+    return hashed.decode("utf-8")    
 
 
 @app.get("/", tags=["Sistema"])
@@ -101,6 +147,93 @@ def get_users(limit: int = 50):
             status_code=500, 
             detail=f"Erro ao listar usuários: {error}",
         )
+    
 
+
+
+@app.patch("/api/users/{user_id}", tags=["Usuários"])
+def patch_user(user_id: int, payload: UserUpdateRequest):
+    try:
+        if payload.role is not None and payload.role not in ["ADMIN", "VENDEDOR"]:
+            raise HTTPException(
+                status_code=400,
+                detail="Perfil inválido. Use ADMIN ou VENDEDOR.",
+            )
+
+        update_user(
+            user_id=user_id,
+            name=payload.name,
+            role=payload.role,
+            ativo=payload.ativo,
+        )
+
+        return {
+            "status": "ok",
+            "message": "Usuário atualizado com sucesso.",
+        }
+
+    except HTTPException:
+        raise
+    except Exception as error:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erro ao atualizar usuário: {error}",
+        )
+
+
+@app.post("/api/users", tags=["Usuários"])
+def post_user(payload: UserCreateRequest):
+    try:
+        if payload.role not in ["ADMIN", "VENDEDOR"]:
+            raise HTTPException(
+                status_code=400,
+                detail="Perfil inválido. Use ADMIN ou VENDEDOR.",
+            )
+
+        temp_password = generate_random_password()
+        password_hash = hash_password(temp_password)
+
+        user_id = create_user(
+            name=payload.name,
+            email=payload.email,
+            password_hash=password_hash,
+            role=payload.role,
+        )
+
+        return {
+            "status": "ok",
+            "id": user_id,
+            "tempPassword": temp_password,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as error:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erro ao criar usuário: {error}",
+        )
+    
+@app.post("/api/users/{user_id}/reset-password", tags=["Usuários"])
+def post_reset_user_password(user_id: int):
+    try:
+        temp_password = generate_random_password()
+        password_hash = hash_password(temp_password)
+
+        reset_user_password(
+            user_id=user_id,
+            password_hash=password_hash,
+        )
+
+        return {
+            "status": "ok",
+            "tempPassword": temp_password,
+        }
+
+    except Exception as error:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erro ao resetar senha do usuário: {error}",
+        )    
 
 

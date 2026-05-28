@@ -128,3 +128,79 @@ def list_users(limit: int = 50) -> list[dict]:
         (limit,), 
     )
 
+
+def update_user(
+    user_id: int,
+    name: str | None = None,
+    role: str | None = None,
+    ativo: bool | None = None,
+) -> None:
+    sets = []
+    params = []
+
+    if name is not None:
+        sets.append("name = ?")
+        params.append(name)
+
+    if role is not None:
+        sets.append("role = ?")
+        params.append(role)
+
+    if ativo is not None:
+        sets.append("ativo = ?")
+        params.append(1 if ativo else 0)
+
+    if not sets:
+        return
+
+    sets.append("updated_at = GETDATE()")
+    params.append(user_id)
+
+    query = f"""
+        UPDATE dbo.users
+        SET {", ".join(sets)}
+        WHERE id = ?
+    """
+
+    with get_connection() as connection:
+        cursor = connection.cursor()
+        cursor.execute(query, tuple(params))
+        connection.commit()
+
+
+
+def create_user(
+    name: str,
+    email: str,
+    password_hash: str,
+    role: str,
+) -> int:
+    query = """
+        INSERT INTO dbo.users (name, email, password_hash, role, ativo, must_change_password)
+        OUTPUT INSERTED.id
+        VALUES (?, ?, ?, ?, 1, 1)
+    """
+
+    with get_connection() as connection:
+        cursor = connection.cursor()
+        cursor.execute(query, (name, email, password_hash, role))
+        row = cursor.fetchone()
+        connection.commit()
+
+    return int(row[0])
+
+
+def reset_user_password(user_id: int, password_hash: str) -> None:
+    query = """
+        UPDATE dbo.users
+        SET password_hash = ?,
+            must_change_password = 1,
+            updated_at = GETDATE()
+        WHERE id = ?
+    """
+
+    with get_connection() as connection:
+        cursor = connection.cursor()
+        cursor.execute(query, (password_hash, user_id))
+        connection.commit()        
+
