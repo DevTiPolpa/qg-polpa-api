@@ -202,5 +202,76 @@ def reset_user_password(user_id: int, password_hash: str) -> None:
     with get_connection() as connection:
         cursor = connection.cursor()
         cursor.execute(query, (password_hash, user_id))
-        connection.commit()        
+        connection.commit()  
+
+def get_user_by_email(email: str) -> dict | None:
+    rows = fetch_all(
+        """
+        SELECT
+            id,
+            name,
+            email,
+            password_hash,
+            role,
+            ativo,
+            must_change_password,
+            last_signed_in
+        FROM dbo.users
+        WHERE email = ?
+        """,
+        (email,),
+    )
+
+    return rows[0] if rows else None
+
+
+def get_user_by_id(user_id: int) -> dict | None:
+    rows = fetch_all(
+        """
+        SELECT
+            id,
+            name,
+            email,
+            password_hash,
+            role,
+            ativo,
+            must_change_password,
+            last_signed_in
+        FROM dbo.users
+        WHERE id = ?
+        """,
+        (user_id,),
+    )
+
+    return rows[0] if rows else None
+
+
+def update_last_signed_in(user_id: int) -> None:
+    with get_connection() as connection:
+        cursor = connection.cursor()
+        cursor.execute(
+            """
+            UPDATE dbo.users
+            SET last_signed_in = GETDATE()
+            WHERE id = ?
+            """,
+            (user_id,),
+        )
+        connection.commit()
+
+
+def update_password(user_id: int, password_hash: str) -> None:
+    with get_connection() as connection:
+        cursor = connection.cursor()
+        cursor.execute(
+            """
+            UPDATE dbo.users
+            SET password_hash = ?,
+                must_change_password = 0,
+                updated_at = GETDATE()
+            WHERE id = ?
+            """,
+            (password_hash, user_id),
+        )
+        connection.commit()              
 
