@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException
 
-from app.database import list_database_tables, test_database_connection
+from app.database import list_database_tables, test_database_connection, list_table_columns, list_users
 
 
 app = FastAPI(
@@ -57,4 +57,50 @@ def debug_list_tables():
             status_code=500,
             detail=f"Erro ao listar tabelas do SQL Server: {error}",
         )
+    
+
+
+@app.get("/api/debug/users/columns", tags=["Debug"])
+def debug_users_columns():
+    try:
+        columns = list_table_columns("users")
+
+        return {
+            "status": "ok",
+            "table": "dbo.users",
+            "count": len(columns),
+            "columns": columns,
+        }
+    except Exception as error:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erro ao listar colunas da tabela users: {error}",
+        )
+    
+
+@app.get("/api/users", tags=["Usuários"])    
+def get_users(limit: int = 50):
+    try:
+        if limit < 1:
+            limit = 1
+
+        if limit > 100:
+            limit = 100
+
+        users = list_users(limit=limit)      
+
+
+        return {
+            "status": "ok", 
+            "count": len(users),
+            "users": users,
+        } 
+    
+    except Exception as error:
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Erro ao listar usuários: {error}",
+        )
+
+
 

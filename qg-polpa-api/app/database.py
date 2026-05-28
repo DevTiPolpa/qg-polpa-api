@@ -89,3 +89,42 @@ def list_database_tables() -> list[dict]:
         """
     )
 
+
+def list_table_columns(table_name: str, table_schema: str = "dbo") -> list[dict]:
+    return fetch_all(
+        """
+        SELECT
+            COLUMN_NAME AS column_name,
+            DATA_TYPE AS data_type,
+            IS_NULLABLE AS is_nullable,
+            CHARACTER_MAXIMUM_LENGTH AS max_length
+        FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = ?
+          AND TABLE_NAME = ?
+        ORDER BY ORDINAL_POSITION
+        """,
+        (table_schema, table_name),
+    )
+
+
+
+def list_users(limit: int = 50) -> list[dict]:
+    return fetch_all(
+
+        """
+        SELECT TOP (?)
+            id,
+            name,
+            email,
+            role,
+            ativo,
+            must_change_password,
+            created_at,
+            updated_at,
+            last_signed_in
+        FROM dbo.users
+        ORDER BY name   
+        """, 
+        (limit,), 
+    )
+
