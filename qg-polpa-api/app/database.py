@@ -63,3 +63,29 @@ def test_database_connection() -> dict:
         "server_name": row.server_name,
         "server_datetime": str(row.server_datetime),
     }
+
+
+def fetch_all(query: str, params: tuple = ()) -> list[dict]:
+    with get_connection() as connection:
+        cursor = connection.cursor()
+        cursor.execute(query, params)
+
+        columns = [column[0] for column in cursor.description]
+        rows = cursor.fetchall()
+
+    return [dict(zip(columns, row)) for row in rows]
+
+
+def list_database_tables() -> list[dict]:
+    return fetch_all(
+        """
+        SELECT
+            TABLE_SCHEMA AS table_schema,
+            TABLE_NAME AS table_name,
+            TABLE_TYPE AS table_type
+        FROM INFORMATION_SCHEMA.TABLES
+        WHERE TABLE_TYPE = 'BASE TABLE'
+        ORDER BY TABLE_SCHEMA, TABLE_NAME
+        """
+    )
+

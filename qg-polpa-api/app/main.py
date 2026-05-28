@@ -1,6 +1,7 @@
 from fastapi import FastAPI, HTTPException
 
-from app.database import test_database_connection
+from app.database import list_database_tables, test_database_connection
+
 
 app = FastAPI(
     title="QG Polpa Brasil API",
@@ -39,3 +40,21 @@ def database_health_check():
             status_code=500,
             detail=f"Erro ao conectar no SQL Server: {error}",
         )
+    
+
+@app.get("/api/debug/tables", tags=["Debug"])
+def debug_list_tables():
+    try:
+        tables = list_database_tables()
+
+        return {
+            "status": "ok",
+            "count": len(tables),
+            "tables": tables,
+        }
+    except Exception as error:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erro ao listar tabelas do SQL Server: {error}",
+        )
+
