@@ -44,21 +44,36 @@ app = FastAPI(
 )
 
 
+DEFAULT_ALLOWED_ORIGINS = [
+    "http://localhost:5173",
+    "http://localhost:5174",
+    "http://127.0.0.1:5173",
+    "http://127.0.0.1:5174",
+    "https://qg-polpa-brasil.vercel.app",
+]
+
+EXTRA_ALLOWED_ORIGINS = [
+    origin.strip().rstrip("/")
+    for origin in os.getenv("FRONTEND_ORIGINS", "").split(",")
+    if origin.strip()
+]
+
+ALLOWED_ORIGINS = sorted(set(DEFAULT_ALLOWED_ORIGINS + EXTRA_ALLOWED_ORIGINS))
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "https://qg-polpa-brasil.vercel.app",
-    ],
+    allow_origins=ALLOWED_ORIGINS,
+    allow_origin_regex=r"^http://localhost:\d+$|^http://127\.0\.0\.1:\d+$|^https://.*\.vercel\.app$",
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
 COOKIE_NAME = "qg_session"
 COOKIE_SECRET = os.getenv("COOKIE_SECRET", "qgpolpabrasil_dev_secret")
 COOKIE_MAX_AGE_SECONDS = 365 * 24 * 60 * 60
+COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() in {"1", "true", "yes", "on"}
+COOKIE_SAMESITE = os.getenv("COOKIE_SAMESITE", "none" if COOKIE_SECURE else "lax")
 
 class Meta2026UpsertRequest(BaseModel):
     nomeVendedor: str = Field(min_length=1)
@@ -143,8 +158,8 @@ def set_session_cookie(response: Response, token: str) -> None:
         value=token,
         max_age=COOKIE_MAX_AGE_SECONDS,
         httponly=True,
-        secure=True,
-        samesite="none",
+        secure=COOKIE_SECURE,
+        samesite=COOKIE_SAMESITE,
         path="/",
     )
 
@@ -153,8 +168,8 @@ def clear_session_cookie(response: Response) -> None:
     response.delete_cookie(
         key=COOKIE_NAME,
         path="/",
-        secure=True,
-        samesite="none",
+        secure=COOKIE_SECURE,
+        samesite=COOKIE_SAMESITE,
     )
 
 
@@ -482,4 +497,4 @@ def get_b2b_resumo(ano: str = "2026"):
         raise HTTPException(
             status_code=500,
             detail=f"Erro ao listar resumo da B2B: {error}",
-        )    
+        )
