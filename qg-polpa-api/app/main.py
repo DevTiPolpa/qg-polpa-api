@@ -16,6 +16,7 @@ from app.database import (
     update_user,
     create_user,
     reset_user_password,
+    list_b2b_resumo,
 )
 
 from app.database import (
@@ -460,3 +461,25 @@ def delete_meta(meta_id: int):
             status_code=500,
             detail=f"Erro ao excluir meta: {error}",
         )
+    
+
+@app.get("/api/b2b/resumo", tags=["B2B"])
+def get_b2b_resumo(ano: str = "2026"):
+    if not ano.isdigit() or len(ano) != 4:
+        raise HTTPException(
+            status_code=400,
+            detail="Ano inválido. Use o formato YYYY, por exemplo: 2026.",
+        )
+
+    try:
+        resumo = list_b2b_resumo(ano=ano)
+        return {
+            "status": "ok",
+            "count": len(resumo),
+            "resumo": resumo,
+        }
+    except Exception as error:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erro ao listar resumo da B2B: {error}",
+        )    

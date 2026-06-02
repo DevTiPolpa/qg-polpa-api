@@ -392,5 +392,73 @@ def delete_meta_2026(meta_id: int) -> None:
 
     conn.commit()
     cursor.close()
-    conn.close()           
+    conn.close()        
+
+
+
+
+def list_b2b_resumo(ano: str = "2026") -> list[dict]:
+    """
+    Lista resumo mensal da tabela dbo.B2B.
+
+    Observações:
+    - Esta função pressupõe que o app/database.py já tenha get_connection().
+    - A consulta usa somente SELECT e agregações, sem qualquer escrita na B2B.
+    - COALESCE(DTMOV, DTNEG) é usado como data operacional base.
+    - ValorPendente é mantido com o nome original de indicador pendente, não como faturamento.
+    """
+    data_inicio = f"{ano}-01-01"
+    data_fim = f"{int(ano) + 1}-01-01"
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        SELECT
+            CONVERT(char(7), COALESCE(DTMOV, DTNEG), 120) AS ano_mes,
+            COALESCE(VENDEDOR, 'SEM VENDEDOR') AS vendedor,
+            COALESCE(PROJETO, 'SEM PROJETO') AS projeto,
+            COALESCE(AD_MERCADO_VENDAS, 'SEM MERCADO') AS mercado_vendas,
+            SUM(COALESCE(QTDNEG, 0)) AS quantidade_negociada,
+            SUM(COALESCE(QTDENTREGUE, 0)) AS quantidade_entregue,
+            SUM(COALESCE(PESOLIQ, 0)) AS peso_liquido,
+            SUM(COALESCE(ValorPendente, 0)) AS valor_pendente,
+            COUNT(DISTINCT NUNOTA) AS notas,
+            COUNT(DISTINCT CODPARC) AS clientes
+        FROM dbo.B2B
+        WHERE COALESCE(DTMOV, DTNEG) >= ?
+          AND COALESCE(DTMOV, DTNEG) < ?
+        GROUP BY
+            CONVERT(char(7), COALESCE(DTMOV, DTNEG), 120),
+            COALESCE(VENDEDOR, 'SEM VENDEDOR'),
+            COALESCE(PROJETO, 'SEM PROJETO'),
+            COALESCE(AD_MERCADO_VENDAS, 'SEM MERCADO')
+        ORDER BY ano_mes, vendedor, projeto, mercado_vendas;
+        """,
+        data_inicio,
+        data_fim,
+    )
+
+    rows = cursor.fetchall()
+    resumo: list[dict] = []
+
+    for row in rows:
+        resumo.append({
+            "anoMes": row.ano_mes,
+            "vendedor": row.vendedor,
+            "projeto": row.projeto,
+            "mercadoVendas": row.mercado_vendas,
+            "quantidadeNegociada": _serialize_decimal(row.quantidade_negociada) or 0,
+            "quantidadeEntregue": _serialize_decimal(row.quantidade_entregue) or 0,
+            "pesoLiquido": _serialize_decimal(row.peso_liquido) or 0,
+            "valorPendente": _serialize_decimal(row.valor_pendente) or 0,
+            "notas": int(row.notas or 0),
+            "clientes": int(row.clientes or 0),
+        })
+
+    cursor.close()
+    conn.close()
+    return resumo
+
 
