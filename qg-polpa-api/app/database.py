@@ -3,6 +3,9 @@ import os
 import pyodbc
 from dotenv import load_dotenv
 
+from decimal import Decimal
+from datetime import datetime
+
 load_dotenv( )
 
 
@@ -273,5 +276,121 @@ def update_password(user_id: int, password_hash: str) -> None:
             """,
             (password_hash, user_id),
         )
-        connection.commit()              
+        connection.commit()           
+
+
+
+
+def _serialize_datetime(value):
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return value
+
+
+def _serialize_decimal(value):
+    if isinstance(value, Decimal):
+        return float(value)
+    return value
+
+
+def list_metas_2026(ano: str = "2026") -> list[dict]:
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        SELECT
+            id,
+            nome_vendedor,
+            mes,
+            valor_meta,
+            projeto,
+            mercado_vendas,
+            created_at,
+            updated_at
+        FROM dbo.metas_2026
+        WHERE mes LIKE ?
+        ORDER BY nome_vendedor, mes, projeto
+        """,
+        f"{ano}-%",
+    )
+
+    rows = cursor.fetchall()
+    metas = []
+
+    for row in rows:
+        metas.append({
+            "id": int(row.id),
+            "nomeVendedor": row.nome_vendedor,
+            "mes": row.mes,
+            "valorMeta": _serialize_decimal(row.valor_meta),
+            "projeto": row.projeto,
+            "mercadoVendas": row.mercado_vendas,
+            "createdAt": _serialize_datetime(row.created_at),
+            "updatedAt": _serialize_datetime(row.updated_at),
+        })
+
+    cursor.close()
+    conn.close()
+    return metas
+
+
+def upsert_meta_2026(
+    nome_vendedor: str,
+    mes: str,
+    valor_meta: float,
+    projeto: str | None = None,
+    mercado_vendas: str | None = None,
+) -> None:
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        MERGE dbo.metas_2026 AS target
+        USING (
+            SELECT
+                ? AS nome_vendedor,
+                ? AS mes,
+                ? AS projeto,
+                ? AS mercado_vendas
+        ) AS source
+        ON target.nome_vendedor = source.nome_vendedor
+           AND target.mes = source.mes
+           AND (target.projeto = source.projeto OR (target.projeto IS NULL AND source.projeto IS NULL))
+           AND (target.mercado_vendas = source.mercado_vendas OR (target.mercado_vendas IS NULL AND source.mercado_vendas IS NULL))
+        WHEN MATCHED THEN
+            UPDATE SET
+                valor_meta = ?,
+                updated_at = SYSDATETIME()
+        WHEN NOT MATCHED THEN
+            INSERT (nome_vendedor, mes, valor_meta, projeto, mercado_vendas, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, SYSDATETIME(), SYSDATETIME());
+        """,
+        nome_vendedor,
+        mes,
+        projeto,
+        mercado_vendas,
+        valor_meta,
+        nome_vendedor,
+        mes,
+        valor_meta,
+        projeto,
+        mercado_vendas,
+    )
+
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+
+def delete_meta_2026(meta_id: int) -> None:
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("DELETE FROM dbo.metas_2026 WHERE id = ?", meta_id)
+
+    conn.commit()
+    cursor.close()
+    conn.close()           
 

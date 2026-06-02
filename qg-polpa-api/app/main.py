@@ -30,6 +30,9 @@ from app.database import (
     get_user_by_id,
     update_last_signed_in,
     update_password,
+    list_metas_2026, 
+    upsert_meta_2026, 
+    delete_meta_2026,
 )
 
 
@@ -55,6 +58,14 @@ app.add_middleware(
 COOKIE_NAME = "qg_session"
 COOKIE_SECRET = os.getenv("COOKIE_SECRET", "qgpolpabrasil_dev_secret")
 COOKIE_MAX_AGE_SECONDS = 365 * 24 * 60 * 60
+
+class Meta2026UpsertRequest(BaseModel):
+    nomeVendedor: str = Field(min_length=1)
+    mes: str = Field(pattern=r"^\d{4}-\d{2}$")
+    valorMeta: float = Field(ge=0)
+    projeto: str | None = None
+    mercadoVendas: str | None = None
+
 
 
 class AuthLoginRequest(BaseModel):
@@ -393,4 +404,59 @@ def auth_change_password(payload: ChangePasswordRequest, request: Request):
         raise HTTPException(
             status_code=500,
             detail=f"Erro ao alterar senha: {error}",
+        )
+    
+
+
+@app.get("/api/metas", tags=["Metas"])
+def get_metas(ano: str = "2026"):
+    try:
+        metas = list_metas_2026(ano=ano)
+        return {
+            "status": "ok",
+            "count": len(metas),
+            "metas": metas,
+        }
+    except Exception as error:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erro ao listar metas: {error}",
+        )
+
+
+@app.post("/api/metas", tags=["Metas"])
+def post_meta(payload: Meta2026UpsertRequest):
+    try:
+        upsert_meta_2026(
+            nome_vendedor=payload.nomeVendedor,
+            mes=payload.mes,
+            valor_meta=payload.valorMeta,
+            projeto=payload.projeto,
+            mercado_vendas=payload.mercadoVendas,
+        )
+
+        return {
+            "status": "ok",
+            "message": "Meta salva com sucesso.",
+        }
+    except Exception as error:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erro ao salvar meta: {error}",
+        )
+
+
+@app.delete("/api/metas/{meta_id}", tags=["Metas"])
+def delete_meta(meta_id: int):
+    try:
+        delete_meta_2026(meta_id)
+
+        return {
+            "status": "ok",
+            "message": "Meta excluída com sucesso.",
+        }
+    except Exception as error:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erro ao excluir meta: {error}",
         )

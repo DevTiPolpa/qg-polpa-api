@@ -1,3 +1,7 @@
 rodar a documentação 
 
 uvicorn app.main:app --reload --host 127.0.0.1 --port 8010
+
+
+rode o ngrok
+ngrok http 8010
