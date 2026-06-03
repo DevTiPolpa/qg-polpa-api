@@ -1,541 +1,21 @@
+"""
+Database layer completo da API QG Polpa Brasil.
+
+Arquivo consolidado para substituir `app/database.py` na API Python/FastAPI local.
+Inclui conexão SQL Server, autenticação/usuários, Metas 2026, B2B, Por Vendedor
+original REST e Dashboard Executivo original REST.
+"""
+
 import os
+from datetime import datetime
+from decimal import Decimal
+from typing import Any
 
 import pyodbc
 from dotenv import load_dotenv
 
-from decimal import Decimal
-from datetime import datetime
-from typing import Any
 
-
-PIPELINE_BLACKLIST = (6, 8)
-
-
-load_dotenv( )
-
-
-def _dash_number(value: Any) -> float:
-    if isinstance(value, Decimal):
-        return float(value)
-    return float(value or 0)
-
-
-def _dash_int(value: Any) -> int:
-    return int(value or 0)
-
-
-def _dash_shift_year(iso_date: str | None, delta: int = -1) -> str | None:
-    if not iso_date:
-        return None
-    try:
-        dt = datetime.strptime(str(iso_date)[:10], "%Y-%m-%d")
-        return dt.replace(year=dt.year + delta).strftime("%Y-%m-%d")
-    except ValueError:
-        return iso_date
-
-
-def _dash_split_filter(value: str | list[str] | tuple[str, ...] | None) -> list[str]:
-    if value is None:
-        return []
-    raw_values = value if isinstance(value, (list, tuple)) else str(value).split(",")
-    return [str(item).strip() for item in raw_values if str(item).strip()]
-
-
-def _dash_build_in_clause(column: str, values: list[str], params: list[Any]) -> str | None:
-    if not values:
-        return None
-    params.extend(values)
-    return f"{column} IN ({','.join(['?'] * len(values))})"
-
-
-def _dash_normalize_filtros(filtros: dict | None) -> dict:
-    filtros = filtros or {}
-    return {
-        "mercados": _dash_split_filter(filtros.get("mercados") or filtros.get("mercado")),
-        "vendedores": _dash_split_filter(filtros.get("vendedores") or filtros.get("vendedor")),
-        "projetos": _dash_split_filter(filtros.get("projetos") or filtros.get("projeto")),
-        "gruposProduto": _dash_split_filter(filtros.get("gruposProduto") or filtros.get("grupoProduto")),
-        "tiposReceita": _dash_split_filter(filtros.get("tiposReceita") or filtros.get("tipoReceita")),
-        "dataInicio": filtros.get("dataInicio"),
-        "dataFim": filtros.get("dataFim"),
-        "codParc": filtros.get("codParc"),
-        "codProduto": filtros.get("codProduto"),
-        "uf": filtros.get("uf"),
-    }
-
-
-def _dash_build_fato_where(filtros: dict | None, alias: str = "fv", ignore_tipo_receita: bool = False) -> tuple[str, list[Any]]:
-    """Replica o buildWhere original do backend Node/tRPC para fato_vendas."""
-    f = _dash_normalize_filtros(filtros)
-    parts: list[str] = []
-    params: list[Any] = []
-
-    for clause in [
-        _dash_build_in_clause(f"{alias}.mercado_vendas", f["mercados"], params),
-        _dash_build_in_clause(f"{alias}.nome_vendedor", f["vendedores"], params),
-        _dash_build_in_clause(f"{alias}.projeto", f["projetos"], params),
-        _dash_build_in_clause(f"{alias}.grupo_produto", f["gruposProduto"], params),
-    ]:
-        if clause:
-            parts.append(clause)
-
-    if not ignore_tipo_receita:
-        tipos_receita = f["tiposReceita"]
-        if "VENDA_FIRME" in tipos_receita and "DEVOLUCAO" not in tipos_receita:
-            tipos_receita = [*tipos_receita, "DEVOLUCAO"]
-        clause = _dash_build_in_clause(f"{alias}.tipo_receita", tipos_receita, params)
-        if clause:
-            parts.append(clause)
-
-    if f["dataInicio"]:
-        parts.append(f"{alias}.dt_entrega_cliente >= ?")
-        params.append(f["dataInicio"])
-    if f["dataFim"]:
-        parts.append(f"{alias}.dt_entrega_cliente <= ?")
-        params.append(f["dataFim"])
-    if f["codParc"]:
-        parts.append(f"{alias}.cod_parc = ?")
-        params.append(int(f["codParc"]))
-    if f["codProduto"]:
-        parts.append(f"{alias}.cod_produto = ?")
-        params.append(int(f["codProduto"]))
-    if f["uf"]:
-        parts.append(f"{alias}.uf = ?")
-        params.append(f["uf"])
-
-    parts.append(f"({alias}.cod_top IS NULL OR {alias}.cod_top != 1023)")
-    parts.append(f"({alias}.[top] IS NULL OR {alias}.[top] NOT LIKE '%ESTOQUE MINIM%')")
-
-    return "WHERE " + " AND ".join(parts), params
-
-
-def _dash_build_orcamento_where(filtros: dict | None) -> tuple[str, list[Any]]:
-    f = _dash_normalize_filtros(filtros)
-    parts: list[str] = []
-    params: list[Any] = []
-
-    if f["dataInicio"]:
-        parts.append("dt_prev_entrega_embarque >= ?")
-        params.append(f["dataInicio"])
-    if f["dataFim"]:
-        parts.append("dt_prev_entrega_embarque <= ?")
-        params.append(f["dataFim"])
-
-    for column, values in [
-        ("projeto", f["projetos"]),
-        ("mercado_vendas", f["mercados"]),
-        ("grupo_produto", f["gruposProduto"]),
-    ]:
-        clause = _dash_build_in_clause(column, values, params)
-        if clause:
-            parts.append(clause)
-
-    return ("WHERE " + " AND ".join(parts), params) if parts else ("", params)
-
-
-def _dash_fetch_all(sql_text: str, params: list[Any] | None = None) -> list[Any]:
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(sql_text, *(params or []))
-    rows = cursor.fetchall()
-    cursor.close()
-    conn.close()
-    return rows
-
-
-def _dash_fetch_one(sql_text: str, params: list[Any] | None = None) -> Any:
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(sql_text, *(params or []))
-    row = cursor.fetchone()
-    cursor.close()
-    conn.close()
-    return row
-
-
-def get_dashboard_original_kpis(filtros: dict | None = None) -> dict:
-    clause, params = _dash_build_fato_where(filtros)
-    row = _dash_fetch_one(
-        f"""
-        SELECT
-            COALESCE(SUM(fv.valor_pendente), 0) AS faturamento_bruto,
-            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volume_bruto,
-            0 AS faturamento_devolucao,
-            0 AS volume_devolucao,
-            COUNT(DISTINCT fv.cod_parc) AS clientes_unicos,
-            COUNT(DISTINCT fv.cod_produto) AS produtos_unicos,
-            COUNT(*) AS total_registros
-        FROM dbo.fato_vendas fv
-        {clause}
-        """,
-        params,
-    )
-    faturamento_bruto = _dash_number(row.faturamento_bruto) if row else 0
-    volume_bruto = _dash_number(row.volume_bruto) if row else 0
-    faturamento_devolucao = _dash_number(row.faturamento_devolucao) if row else 0
-    volume_devolucao = _dash_number(row.volume_devolucao) if row else 0
-    faturamento_total = faturamento_bruto - faturamento_devolucao
-    volume_total = volume_bruto - volume_devolucao
-    return {
-        "faturamentoTotal": faturamento_total,
-        "volumeTotal": volume_total,
-        "precoMedio": faturamento_total / volume_total if volume_total else 0,
-        "faturamentoDevolucao": faturamento_devolucao,
-        "volumeDevolucao": volume_devolucao,
-        "clientesAtivos": _dash_int(row.clientes_unicos) if row else 0,
-        "produtosVendidos": _dash_int(row.produtos_unicos) if row else 0,
-        "totalRegistros": _dash_int(row.total_registros) if row else 0,
-    }
-
-
-def get_dashboard_original_kpis_ano_anterior(filtros: dict | None = None) -> dict:
-    filtros_ant = dict(filtros or {})
-    filtros_ant["dataInicio"] = _dash_shift_year(filtros_ant.get("dataInicio"))
-    filtros_ant["dataFim"] = _dash_shift_year(filtros_ant.get("dataFim"))
-    return get_dashboard_original_kpis(filtros_ant)
-
-
-def list_dashboard_original_evolucao_mensal(filtros: dict | None = None) -> list[dict]:
-    clause, params = _dash_build_fato_where(filtros)
-    rows = _dash_fetch_all(
-        f"""
-        SELECT
-            FORMAT(fv.dt_entrega_cliente, 'yyyy-MM') AS mes,
-            COALESCE(SUM(fv.valor_pendente), 0) AS faturamento,
-            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volume,
-            COALESCE(SUM(CASE WHEN fv.tipo_receita IN ('VENDA_FIRME','DEVOLUCAO') THEN fv.valor_pendente ELSE 0 END), 0) AS venda_firme,
-            COALESCE(SUM(CASE WHEN fv.tipo_receita = 'FORECAST' THEN fv.valor_pendente ELSE 0 END), 0) AS forecast,
-            COALESCE(SUM(CASE WHEN fv.tipo_receita = 'NOVO_PROJETO' THEN fv.valor_pendente ELSE 0 END), 0) AS novo_projeto
-        FROM dbo.fato_vendas fv
-        {clause}
-        GROUP BY FORMAT(fv.dt_entrega_cliente, 'yyyy-MM')
-        ORDER BY FORMAT(fv.dt_entrega_cliente, 'yyyy-MM')
-        """,
-        params,
-    )
-    return [
-        {
-            "mes": row.mes,
-            "faturamento": _dash_number(row.faturamento),
-            "volume": _dash_number(row.volume),
-            "vendaFirme": _dash_number(row.venda_firme),
-            "forecast": _dash_number(row.forecast),
-            "novoProjeto": _dash_number(row.novo_projeto),
-        }
-        for row in rows
-    ]
-
-
-def list_dashboard_original_evolucao_ano_anterior(filtros: dict | None = None) -> list[dict]:
-    filtros_ant = dict(filtros or {})
-    filtros_ant["dataInicio"] = _dash_shift_year(filtros_ant.get("dataInicio"))
-    filtros_ant["dataFim"] = _dash_shift_year(filtros_ant.get("dataFim"))
-    clause, params = _dash_build_fato_where(filtros_ant)
-    ano_atual = None
-    if (filtros or {}).get("dataInicio"):
-        try:
-            ano_atual = datetime.strptime(str((filtros or {}).get("dataInicio"))[:10], "%Y-%m-%d").year
-        except ValueError:
-            ano_atual = None
-    rows = _dash_fetch_all(
-        f"""
-        SELECT
-            FORMAT(fv.dt_entrega_cliente, 'yyyy-MM') AS mes,
-            COALESCE(SUM(fv.valor_pendente), 0) AS faturamento,
-            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volume
-        FROM dbo.fato_vendas fv
-        {clause}
-        GROUP BY FORMAT(fv.dt_entrega_cliente, 'yyyy-MM')
-        ORDER BY FORMAT(fv.dt_entrega_cliente, 'yyyy-MM')
-        """,
-        params,
-    )
-    result: list[dict] = []
-    for row in rows:
-        mes = row.mes
-        mes_alinhado = f"{ano_atual}-{str(mes).split('-')[1]}" if ano_atual and mes else mes
-        result.append({
-            "mes": mes,
-            "faturamento": _dash_number(row.faturamento),
-            "volume": _dash_number(row.volume),
-            "mesAlinhado": mes_alinhado,
-            "mesOriginal": mes,
-        })
-    return result
-
-
-def list_dashboard_original_kpis_por_tipo(filtros: dict | None = None) -> list[dict]:
-    clause, params = _dash_build_fato_where(filtros, ignore_tipo_receita=True)
-    rows = _dash_fetch_all(
-        f"""
-        SELECT
-            CASE WHEN fv.tipo_receita = 'DEVOLUCAO' THEN 'VENDA_FIRME' ELSE fv.tipo_receita END AS tipo_receita,
-            COALESCE(SUM(fv.valor_pendente), 0) AS faturamento,
-            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volume,
-            COUNT(DISTINCT fv.cod_parc) AS clientes,
-            COUNT(*) AS registros
-        FROM dbo.fato_vendas fv
-        {clause}
-        GROUP BY CASE WHEN fv.tipo_receita = 'DEVOLUCAO' THEN 'VENDA_FIRME' ELSE fv.tipo_receita END
-        """,
-        params,
-    )
-    return [
-        {
-            "tipoReceita": row.tipo_receita,
-            "faturamento": _dash_number(row.faturamento),
-            "volume": _dash_number(row.volume),
-            "clientes": _dash_int(row.clientes),
-            "registros": _dash_int(row.registros),
-        }
-        for row in rows
-    ]
-
-
-def get_dashboard_original_total_vendas() -> int:
-    row = _dash_fetch_one("SELECT COUNT(*) AS total FROM dbo.fato_vendas")
-    return _dash_int(row.total) if row else 0
-
-
-def get_dashboard_original_orcamento_kpis(filtros: dict | None = None) -> dict:
-    clause, params = _dash_build_orcamento_where(filtros)
-    row = _dash_fetch_one(
-        f"""
-        SELECT
-            COALESCE(SUM(valor_pendente), 0) AS faturamento_total,
-            COALESCE(SUM(qtd_pendente_kg), 0) AS volume_total,
-            COUNT(*) AS total_registros,
-            COUNT(DISTINCT cod_parc) AS clientes_unicos,
-            COUNT(DISTINCT cod_produto) AS produtos_unicos
-        FROM dbo.orcamento_2026
-        {clause}
-        """,
-        params,
-    )
-    return {
-        "faturamentoTotal": _dash_number(row.faturamento_total) if row else 0,
-        "volumeTotal": _dash_number(row.volume_total) if row else 0,
-        "totalRegistros": _dash_int(row.total_registros) if row else 0,
-        "clientesUnicos": _dash_int(row.clientes_unicos) if row else 0,
-        "produtosUnicos": _dash_int(row.produtos_unicos) if row else 0,
-    }
-
-
-def list_dashboard_original_orcamento_mensal(filtros: dict | None = None) -> list[dict]:
-    clause, params = _dash_build_orcamento_where(filtros)
-    rows = _dash_fetch_all(
-        f"""
-        SELECT
-            FORMAT(dt_prev_entrega_embarque, 'yyyy-MM') AS mes,
-            COALESCE(SUM(valor_pendente), 0) AS faturamento,
-            COALESCE(SUM(qtd_pendente_kg), 0) AS volume
-        FROM dbo.orcamento_2026
-        {clause}
-        GROUP BY FORMAT(dt_prev_entrega_embarque, 'yyyy-MM')
-        ORDER BY FORMAT(dt_prev_entrega_embarque, 'yyyy-MM')
-        """,
-        params,
-    )
-    return [{"mes": row.mes, "faturamento": _dash_number(row.faturamento), "volume": _dash_number(row.volume)} for row in rows]
-
-
-def list_dashboard_original_segmentos(filtros: dict | None = None) -> list[dict]:
-    clause, params = _dash_build_fato_where(filtros)
-    rows = _dash_fetch_all(
-        f"""
-        SELECT
-            fv.perfil_parceiro AS segmento,
-            COALESCE(SUM(fv.valor_pendente), 0) AS faturamento,
-            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volume,
-            COUNT(DISTINCT fv.cod_parc) AS clientes,
-            COUNT(DISTINCT fv.cod_produto) AS produtos
-        FROM dbo.fato_vendas fv
-        {clause}
-        GROUP BY fv.perfil_parceiro
-        ORDER BY SUM(fv.valor_pendente) DESC
-        """,
-        params,
-    )
-    return [
-        {
-            "segmento": row.segmento,
-            "faturamento": _dash_number(row.faturamento),
-            "volume": _dash_number(row.volume),
-            "clientes": _dash_int(row.clientes),
-            "produtos": _dash_int(row.produtos),
-        }
-        for row in rows
-    ]
-
-
-def list_dashboard_original_projetos(filtros: dict | None = None) -> list[dict]:
-    clause, params = _dash_build_fato_where(filtros)
-    rows = _dash_fetch_all(
-        f"""
-        SELECT
-            fv.projeto AS projeto,
-            COALESCE(SUM(fv.valor_pendente), 0) AS faturamento,
-            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volume,
-            COUNT(DISTINCT fv.cod_parc) AS clientes
-        FROM dbo.fato_vendas fv
-        {clause}
-        GROUP BY fv.projeto
-        ORDER BY SUM(fv.valor_pendente) DESC
-        """,
-        params,
-    )
-    return [
-        {
-            "projeto": row.projeto,
-            "faturamento": _dash_number(row.faturamento),
-            "volume": _dash_number(row.volume),
-            "clientes": _dash_int(row.clientes),
-        }
-        for row in rows
-    ]
-
-
-def list_dashboard_original_clientes_top(filtros: dict | None = None, limit: int = 50) -> list[dict]:
-    clause, params = _dash_build_fato_where(filtros)
-    safe_limit = max(1, min(int(limit or 50), 500))
-    rows = _dash_fetch_all(
-        f"""
-        SELECT TOP ({safe_limit})
-            fv.cod_parc AS cod_parc,
-            COALESCE(dc.razao_social, fv.RAZAOSOCIAL) AS razao_social,
-            COALESCE(SUM(fv.valor_pendente), 0) AS faturamento,
-            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volume,
-            COUNT(DISTINCT fv.cod_produto) AS produtos
-        FROM dbo.fato_vendas fv
-        LEFT JOIN dbo.dim_cliente dc ON fv.cod_parc = dc.cod_parc
-        {clause}
-        GROUP BY fv.cod_parc, dc.razao_social, fv.RAZAOSOCIAL
-        ORDER BY SUM(fv.valor_pendente) DESC
-        """,
-        params,
-    )
-    return [
-        {
-            "codParc": _dash_int(row.cod_parc),
-            "razaoSocial": row.razao_social,
-            "faturamento": _dash_number(row.faturamento),
-            "volume": _dash_number(row.volume),
-            "produtos": _dash_int(row.produtos),
-        }
-        for row in rows
-    ]
-
-
-def list_dashboard_original_drilldown(tipo_receita: str, filtros: dict | None = None) -> list[dict]:
-    filtros_tipo = dict(filtros or {})
-    filtros_tipo["tiposReceita"] = [tipo_receita]
-    clause, params = _dash_build_fato_where(filtros_tipo)
-    rows = _dash_fetch_all(
-        f"""
-        SELECT
-            fv.cod_parc AS cod_parc,
-            COALESCE(dc.razao_social, fv.RAZAOSOCIAL) AS razao_social,
-            fv.cod_produto AS cod_produto,
-            COALESCE(dp.nome_produto, fv.nome_produto) AS nome_produto,
-            fv.grupo_produto AS grupo_produto,
-            fv.nome_vendedor AS nome_vendedor,
-            COALESCE(SUM(fv.valor_pendente), 0) AS faturamento,
-            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volume,
-            COUNT(*) AS registros,
-            MAX(CONVERT(VARCHAR, fv.dt_entrega_cliente, 23)) AS dt_prev_entrega
-        FROM dbo.fato_vendas fv
-        LEFT JOIN dbo.dim_cliente dc ON fv.cod_parc = dc.cod_parc
-        LEFT JOIN dbo.dim_produto dp ON fv.cod_produto = dp.cod_produto
-        {clause}
-        GROUP BY fv.cod_parc, dc.razao_social, fv.RAZAOSOCIAL, fv.cod_produto, dp.nome_produto, fv.nome_produto, fv.grupo_produto, fv.nome_vendedor
-        ORDER BY SUM(fv.valor_pendente) DESC
-        """,
-        params,
-    )
-    return [
-        {
-            "codParc": _dash_int(row.cod_parc),
-            "razaoSocial": row.razao_social,
-            "codProduto": _dash_int(row.cod_produto),
-            "nomeProduto": row.nome_produto,
-            "grupoProduto": row.grupo_produto,
-            "nomeVendedor": row.nome_vendedor,
-            "faturamento": _dash_number(row.faturamento),
-            "volume": _dash_number(row.volume),
-            "registros": _dash_int(row.registros),
-            "dtPrevEntrega": row.dt_prev_entrega,
-        }
-        for row in rows
-    ]
-
-
-def list_dashboard_original_cliente_mix(cod_parc: int, filtros: dict | None = None, limit: int = 30) -> list[dict]:
-    filtros_cliente = dict(filtros or {})
-    filtros_cliente["codParc"] = cod_parc
-    clause, params = _dash_build_fato_where(filtros_cliente)
-    safe_limit = max(1, min(int(limit or 30), 200))
-    rows = _dash_fetch_all(
-        f"""
-        SELECT TOP ({safe_limit})
-            fv.cod_produto AS cod_produto,
-            COALESCE(dp.nome_produto, fv.nome_produto) AS nome_produto,
-            fv.grupo_produto AS grupo_produto,
-            COALESCE(SUM(fv.valor_pendente), 0) AS faturamento,
-            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volume
-        FROM dbo.fato_vendas fv
-        LEFT JOIN dbo.dim_produto dp ON fv.cod_produto = dp.cod_produto
-        {clause}
-        GROUP BY fv.cod_produto, dp.nome_produto, fv.nome_produto, fv.grupo_produto
-        ORDER BY SUM(fv.valor_pendente) DESC
-        """,
-        params,
-    )
-    return [
-        {
-            "codProduto": _dash_int(row.cod_produto),
-            "nomeProduto": row.nome_produto,
-            "grupoProduto": row.grupo_produto,
-            "faturamento": _dash_number(row.faturamento),
-            "volume": _dash_number(row.volume),
-        }
-        for row in rows
-    ]
-
-
-def get_dashboard_original_filtros_disponiveis() -> dict:
-    conn = get_connection()
-    cursor = conn.cursor()
-    try:
-        cursor.execute("SELECT DISTINCT mercado_vendas AS value FROM dbo.fato_vendas WHERE mercado_vendas IS NOT NULL ORDER BY mercado_vendas")
-        mercados = [row.value for row in cursor.fetchall() if row.value]
-        cursor.execute("SELECT DISTINCT nome_vendedor AS value FROM dbo.fato_vendas WHERE nome_vendedor IS NOT NULL ORDER BY nome_vendedor")
-        vendedores = [row.value for row in cursor.fetchall() if row.value]
-        cursor.execute("SELECT DISTINCT projeto AS value FROM dbo.fato_vendas WHERE projeto IS NOT NULL ORDER BY projeto")
-        projetos = [row.value for row in cursor.fetchall() if row.value]
-        cursor.execute("SELECT DISTINCT grupo_produto AS value FROM dbo.fato_vendas WHERE grupo_produto IS NOT NULL ORDER BY grupo_produto")
-        grupos = [row.value for row in cursor.fetchall() if row.value]
-        cursor.execute("SELECT cod_parc AS cod_parc, razao_social AS razao_social FROM dbo.dim_cliente ORDER BY razao_social")
-        clientes = [{"codParc": _dash_int(row.cod_parc), "razaoSocial": row.razao_social} for row in cursor.fetchall()]
-    finally:
-        cursor.close()
-        conn.close()
-    return {"mercados": mercados, "vendedores": vendedores, "projetos": projetos, "grupos": grupos, "clientes": clientes}
-
-
-def get_dashboard_original_resumo(filtros: dict | None = None, limit_clientes: int = 50) -> dict:
-    return {
-        "kpis": get_dashboard_original_kpis(filtros),
-        "kpisAnoAnterior": get_dashboard_original_kpis_ano_anterior(filtros),
-        "evolucaoMensal": list_dashboard_original_evolucao_mensal(filtros),
-        "evolucaoMensalAnoAnterior": list_dashboard_original_evolucao_ano_anterior(filtros),
-        "kpisPorTipo": list_dashboard_original_kpis_por_tipo(filtros),
-        "totalVendas": get_dashboard_original_total_vendas(),
-        "segmentos": list_dashboard_original_segmentos(filtros),
-        "projetos": list_dashboard_original_projetos(filtros),
-        "clientesTop": list_dashboard_original_clientes_top(filtros, limit_clientes),
-        "orcamentoKpis": get_dashboard_original_orcamento_kpis(filtros),
-        "orcamentoMensal": list_dashboard_original_orcamento_mensal(filtros),
-    }
+load_dotenv()
 
 
 def get_connection_string() -> str:
@@ -805,21 +285,202 @@ def update_password(user_id: int, password_hash: str) -> None:
             """,
             (password_hash, user_id),
         )
-        connection.commit()           
+        connection.commit()
 
 
+# =============================================================================
+# Metas 2026
+# =============================================================================
+
+def list_metas_2026(ano: str = "2026") -> list[dict]:
+    """
+    Lista metas cadastradas em dbo.metas_2026.
+
+    Esta função pressupõe que o seu app/database.py já tenha uma função
+    de conexão parecida com get_connection(). Se no seu arquivo o nome for
+    diferente, reaproveite o mesmo padrão usado por list_users().
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT
+            id,
+            nome_vendedor,
+            mes,
+            valor_meta,
+            projeto,
+            mercado_vendas,
+            created_at,
+            updated_at
+        FROM dbo.metas_2026
+        WHERE mes LIKE ?
+        ORDER BY nome_vendedor, mes, projeto
+        """,
+        f"{ano}-%",
+    )
+
+    rows = cursor.fetchall()
+    metas: list[dict] = []
+
+    for row in rows:
+        metas.append({
+            "id": int(row.id),
+            "nomeVendedor": row.nome_vendedor,
+            "mes": row.mes,
+            "valorMeta": _serialize_decimal(row.valor_meta),
+            "projeto": row.projeto,
+            "mercadoVendas": row.mercado_vendas,
+            "createdAt": _serialize_datetime(row.created_at),
+            "updatedAt": _serialize_datetime(row.updated_at),
+        })
+
+    cursor.close()
+    conn.close()
+    return metas
 
 
-def _serialize_datetime(value):
+def upsert_meta_2026(nome_vendedor: str, mes: str, valor_meta: float, projeto: str | None = None, mercado_vendas: str | None = None) -> None:
+    """
+    Cria ou atualiza meta usando a regra atual:
+    nome_vendedor + mes + projeto + mercado_vendas.
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        MERGE dbo.metas_2026 AS target
+        USING (
+            SELECT
+                ? AS nome_vendedor,
+                ? AS mes,
+                ? AS projeto,
+                ? AS mercado_vendas
+        ) AS source
+        ON target.nome_vendedor = source.nome_vendedor
+           AND target.mes = source.mes
+           AND (target.projeto = source.projeto OR (target.projeto IS NULL AND source.projeto IS NULL))
+           AND (target.mercado_vendas = source.mercado_vendas OR (target.mercado_vendas IS NULL AND source.mercado_vendas IS NULL))
+        WHEN MATCHED THEN
+            UPDATE SET
+                valor_meta = ?,
+                updated_at = SYSDATETIME()
+        WHEN NOT MATCHED THEN
+            INSERT (nome_vendedor, mes, valor_meta, projeto, mercado_vendas, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, SYSDATETIME(), SYSDATETIME());
+        """,
+        nome_vendedor,
+        mes,
+        projeto,
+        mercado_vendas,
+        valor_meta,
+        nome_vendedor,
+        mes,
+        valor_meta,
+        projeto,
+        mercado_vendas,
+    )
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+
+def delete_meta_2026(meta_id: int) -> None:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM dbo.metas_2026 WHERE id = ?", meta_id)
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+
+# =============================================================================
+# B2B — leitura operacional
+# =============================================================================
+
+def list_b2b_resumo(ano: str = "2026") -> list[dict]:
+    """
+    Lista resumo mensal da tabela dbo.B2B.
+
+    Observações:
+    - Esta função pressupõe que o app/database.py já tenha get_connection().
+    - A consulta usa somente SELECT e agregações, sem qualquer escrita na B2B.
+    - COALESCE(DTMOV, DTNEG) é usado como data operacional base.
+    - ValorPendente é mantido com o nome original de indicador pendente, não como faturamento.
+    """
+    data_inicio = f"{ano}-01-01"
+    data_fim = f"{int(ano) + 1}-01-01"
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        SELECT
+            CONVERT(char(7), COALESCE(DTMOV, DTNEG), 120) AS ano_mes,
+            COALESCE(VENDEDOR, 'SEM VENDEDOR') AS vendedor,
+            COALESCE(PROJETO, 'SEM PROJETO') AS projeto,
+            COALESCE(AD_MERCADO_VENDAS, 'SEM MERCADO') AS mercado_vendas,
+            SUM(COALESCE(QTDNEG, 0)) AS quantidade_negociada,
+            SUM(COALESCE(QTDENTREGUE, 0)) AS quantidade_entregue,
+            SUM(COALESCE(PESOLIQ, 0)) AS peso_liquido,
+            SUM(COALESCE(ValorPendente, 0)) AS valor_pendente,
+            COUNT(DISTINCT NUNOTA) AS notas,
+            COUNT(DISTINCT CODPARC) AS clientes
+        FROM dbo.B2B
+        WHERE COALESCE(DTMOV, DTNEG) >= ?
+          AND COALESCE(DTMOV, DTNEG) < ?
+        GROUP BY
+            CONVERT(char(7), COALESCE(DTMOV, DTNEG), 120),
+            COALESCE(VENDEDOR, 'SEM VENDEDOR'),
+            COALESCE(PROJETO, 'SEM PROJETO'),
+            COALESCE(AD_MERCADO_VENDAS, 'SEM MERCADO')
+        ORDER BY ano_mes, vendedor, projeto, mercado_vendas;
+        """,
+        data_inicio,
+        data_fim,
+    )
+
+    rows = cursor.fetchall()
+    resumo: list[dict] = []
+
+    for row in rows:
+        resumo.append({
+            "anoMes": row.ano_mes,
+            "vendedor": row.vendedor,
+            "projeto": row.projeto,
+            "mercadoVendas": row.mercado_vendas,
+            "quantidadeNegociada": _serialize_decimal(row.quantidade_negociada) or 0,
+            "quantidadeEntregue": _serialize_decimal(row.quantidade_entregue) or 0,
+            "pesoLiquido": _serialize_decimal(row.peso_liquido) or 0,
+            "valorPendente": _serialize_decimal(row.valor_pendente) or 0,
+            "notas": int(row.notas or 0),
+            "clientes": int(row.clientes or 0),
+        })
+
+    cursor.close()
+    conn.close()
+    return resumo
+
+
+# =============================================================================
+# Por Vendedor — dados originais migrados para REST
+# =============================================================================
+
+PIPELINE_BLACKLIST = (6, 8)
+
+
+def _serialize_datetime(value: Any) -> Any:
     if isinstance(value, datetime):
         return value.isoformat()
     return value
 
 
-def _serialize_decimal(value):
+def _serialize_decimal(value: Any) -> Any:
     if isinstance(value, Decimal):
         return float(value)
     return value
+
 
 def _number(value: Any) -> float:
     value = _serialize_decimal(value)
@@ -828,6 +489,7 @@ def _number(value: Any) -> float:
 
 def _int(value: Any) -> int:
     return int(value or 0)
+
 
 def _split_filter(value: str | list[str] | tuple[str, ...] | None) -> list[str]:
     if value is None:
@@ -1320,172 +982,585 @@ def get_vendedores_original_resumo(filtros: dict | None = None, limit_clientes: 
     }
 
 
-def list_metas_2026(ano: str = "2026") -> list[dict]:
+
+# =============================================================================
+# Por Vendedor — mix de produtos por cliente para expansão lazy
+# =============================================================================
+
+def list_vendedores_cliente_mix_original(cod_parc: int, filtros: dict | None = None) -> list[dict]:
+    filtros_sem_cliente = dict(filtros or {})
+    filtros_sem_cliente.pop("codParc", None)
+    clause, params = build_fato_vendas_where(filtros_sem_cliente, "fv")
+    add_cond = clause.replace("WHERE ", "AND ", 1) if clause else ""
+
     conn = get_connection()
     cursor = conn.cursor()
-
     cursor.execute(
-        """
+        f"""
         SELECT
-            id,
-            nome_vendedor,
-            mes,
-            valor_meta,
-            projeto,
-            mercado_vendas,
-            created_at,
-            updated_at
-        FROM dbo.metas_2026
-        WHERE mes LIKE ?
-        ORDER BY nome_vendedor, mes, projeto
+            fv.cod_produto AS codProduto,
+            COALESCE(dp.nome_produto, fv.nome_produto) AS nomeProduto,
+            fv.grupo_produto AS grupoProduto,
+            COALESCE(SUM(fv.valor_pendente), 0) AS faturamento,
+            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volume,
+            COUNT(DISTINCT fv.nro_unico) AS pedidos,
+            MAX(CONVERT(VARCHAR, fv.dt_entrega_cliente, 23)) AS ultimaCompra
+        FROM dbo.fato_vendas fv
+        LEFT JOIN dbo.dim_produto dp ON fv.cod_produto = dp.cod_produto
+        WHERE fv.cod_parc = ?
+          AND fv.flag_devolucao = 0
+          {add_cond}
+        GROUP BY fv.cod_produto, dp.nome_produto, fv.nome_produto, fv.grupo_produto
+        ORDER BY SUM(fv.valor_pendente) DESC
         """,
-        f"{ano}-%",
+        int(cod_parc),
+        *params,
     )
-
     rows = cursor.fetchall()
-    metas = []
+    cursor.close()
+    conn.close()
 
-    for row in rows:
-        metas.append({
-            "id": int(row.id),
-            "nomeVendedor": row.nome_vendedor,
+    return [
+        {
+            "codProduto": _int(row.codProduto),
+            "nomeProduto": row.nomeProduto,
+            "grupoProduto": row.grupoProduto,
+            "faturamento": _number(row.faturamento),
+            "volume": _number(row.volume),
+            "pedidos": _int(row.pedidos),
+            "ultimaCompra": _serialize_datetime(row.ultimaCompra),
+        }
+        for row in rows
+    ]
+
+
+
+# =============================================================================
+# Dashboard Executivo — dados originais migrados para REST
+# =============================================================================
+
+def _dash_number(value: Any) -> float:
+    if isinstance(value, Decimal):
+        return float(value)
+    return float(value or 0)
+
+
+def _dash_int(value: Any) -> int:
+    return int(value or 0)
+
+
+def _dash_shift_year(iso_date: str | None, delta: int = -1) -> str | None:
+    if not iso_date:
+        return None
+    try:
+        dt = datetime.strptime(str(iso_date)[:10], "%Y-%m-%d")
+        return dt.replace(year=dt.year + delta).strftime("%Y-%m-%d")
+    except ValueError:
+        return iso_date
+
+
+def _dash_split_filter(value: str | list[str] | tuple[str, ...] | None) -> list[str]:
+    if value is None:
+        return []
+    raw_values = value if isinstance(value, (list, tuple)) else str(value).split(",")
+    return [str(item).strip() for item in raw_values if str(item).strip()]
+
+
+def _dash_build_in_clause(column: str, values: list[str], params: list[Any]) -> str | None:
+    if not values:
+        return None
+    params.extend(values)
+    return f"{column} IN ({','.join(['?'] * len(values))})"
+
+
+def _dash_normalize_filtros(filtros: dict | None) -> dict:
+    filtros = filtros or {}
+    return {
+        "mercados": _dash_split_filter(filtros.get("mercados") or filtros.get("mercado")),
+        "vendedores": _dash_split_filter(filtros.get("vendedores") or filtros.get("vendedor")),
+        "projetos": _dash_split_filter(filtros.get("projetos") or filtros.get("projeto")),
+        "gruposProduto": _dash_split_filter(filtros.get("gruposProduto") or filtros.get("grupoProduto")),
+        "tiposReceita": _dash_split_filter(filtros.get("tiposReceita") or filtros.get("tipoReceita")),
+        "dataInicio": filtros.get("dataInicio"),
+        "dataFim": filtros.get("dataFim"),
+        "codParc": filtros.get("codParc"),
+        "codProduto": filtros.get("codProduto"),
+        "uf": filtros.get("uf"),
+    }
+
+
+def _dash_build_fato_where(filtros: dict | None, alias: str = "fv", ignore_tipo_receita: bool = False) -> tuple[str, list[Any]]:
+    """Replica o buildWhere original do backend Node/tRPC para fato_vendas."""
+    f = _dash_normalize_filtros(filtros)
+    parts: list[str] = []
+    params: list[Any] = []
+
+    for clause in [
+        _dash_build_in_clause(f"{alias}.mercado_vendas", f["mercados"], params),
+        _dash_build_in_clause(f"{alias}.nome_vendedor", f["vendedores"], params),
+        _dash_build_in_clause(f"{alias}.projeto", f["projetos"], params),
+        _dash_build_in_clause(f"{alias}.grupo_produto", f["gruposProduto"], params),
+    ]:
+        if clause:
+            parts.append(clause)
+
+    if not ignore_tipo_receita:
+        tipos_receita = f["tiposReceita"]
+        if "VENDA_FIRME" in tipos_receita and "DEVOLUCAO" not in tipos_receita:
+            tipos_receita = [*tipos_receita, "DEVOLUCAO"]
+        clause = _dash_build_in_clause(f"{alias}.tipo_receita", tipos_receita, params)
+        if clause:
+            parts.append(clause)
+
+    if f["dataInicio"]:
+        parts.append(f"{alias}.dt_entrega_cliente >= ?")
+        params.append(f["dataInicio"])
+    if f["dataFim"]:
+        parts.append(f"{alias}.dt_entrega_cliente <= ?")
+        params.append(f["dataFim"])
+    if f["codParc"]:
+        parts.append(f"{alias}.cod_parc = ?")
+        params.append(int(f["codParc"]))
+    if f["codProduto"]:
+        parts.append(f"{alias}.cod_produto = ?")
+        params.append(int(f["codProduto"]))
+    if f["uf"]:
+        parts.append(f"{alias}.uf = ?")
+        params.append(f["uf"])
+
+    parts.append(f"({alias}.cod_top IS NULL OR {alias}.cod_top != 1023)")
+    parts.append(f"({alias}.[top] IS NULL OR {alias}.[top] NOT LIKE '%ESTOQUE MINIM%')")
+
+    return "WHERE " + " AND ".join(parts), params
+
+
+def _dash_build_orcamento_where(filtros: dict | None) -> tuple[str, list[Any]]:
+    f = _dash_normalize_filtros(filtros)
+    parts: list[str] = []
+    params: list[Any] = []
+
+    if f["dataInicio"]:
+        parts.append("dt_prev_entrega_embarque >= ?")
+        params.append(f["dataInicio"])
+    if f["dataFim"]:
+        parts.append("dt_prev_entrega_embarque <= ?")
+        params.append(f["dataFim"])
+
+    for column, values in [
+        ("projeto", f["projetos"]),
+        ("mercado_vendas", f["mercados"]),
+        ("grupo_produto", f["gruposProduto"]),
+    ]:
+        clause = _dash_build_in_clause(column, values, params)
+        if clause:
+            parts.append(clause)
+
+    return ("WHERE " + " AND ".join(parts), params) if parts else ("", params)
+
+
+def _dash_fetch_all(sql_text: str, params: list[Any] | None = None) -> list[Any]:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(sql_text, *(params or []))
+    rows = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    return rows
+
+
+def _dash_fetch_one(sql_text: str, params: list[Any] | None = None) -> Any:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(sql_text, *(params or []))
+    row = cursor.fetchone()
+    cursor.close()
+    conn.close()
+    return row
+
+
+def get_dashboard_original_kpis(filtros: dict | None = None) -> dict:
+    clause, params = _dash_build_fato_where(filtros)
+    row = _dash_fetch_one(
+        f"""
+        SELECT
+            COALESCE(SUM(fv.valor_pendente), 0) AS faturamento_bruto,
+            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volume_bruto,
+            0 AS faturamento_devolucao,
+            0 AS volume_devolucao,
+            COUNT(DISTINCT fv.cod_parc) AS clientes_unicos,
+            COUNT(DISTINCT fv.cod_produto) AS produtos_unicos,
+            COUNT(*) AS total_registros
+        FROM dbo.fato_vendas fv
+        {clause}
+        """,
+        params,
+    )
+    faturamento_bruto = _dash_number(row.faturamento_bruto) if row else 0
+    volume_bruto = _dash_number(row.volume_bruto) if row else 0
+    faturamento_devolucao = _dash_number(row.faturamento_devolucao) if row else 0
+    volume_devolucao = _dash_number(row.volume_devolucao) if row else 0
+    faturamento_total = faturamento_bruto - faturamento_devolucao
+    volume_total = volume_bruto - volume_devolucao
+    return {
+        "faturamentoTotal": faturamento_total,
+        "volumeTotal": volume_total,
+        "precoMedio": faturamento_total / volume_total if volume_total else 0,
+        "faturamentoDevolucao": faturamento_devolucao,
+        "volumeDevolucao": volume_devolucao,
+        "clientesAtivos": _dash_int(row.clientes_unicos) if row else 0,
+        "produtosVendidos": _dash_int(row.produtos_unicos) if row else 0,
+        "totalRegistros": _dash_int(row.total_registros) if row else 0,
+    }
+
+
+def get_dashboard_original_kpis_ano_anterior(filtros: dict | None = None) -> dict:
+    filtros_ant = dict(filtros or {})
+    filtros_ant["dataInicio"] = _dash_shift_year(filtros_ant.get("dataInicio"))
+    filtros_ant["dataFim"] = _dash_shift_year(filtros_ant.get("dataFim"))
+    return get_dashboard_original_kpis(filtros_ant)
+
+
+def list_dashboard_original_evolucao_mensal(filtros: dict | None = None) -> list[dict]:
+    clause, params = _dash_build_fato_where(filtros)
+    rows = _dash_fetch_all(
+        f"""
+        SELECT
+            FORMAT(fv.dt_entrega_cliente, 'yyyy-MM') AS mes,
+            COALESCE(SUM(fv.valor_pendente), 0) AS faturamento,
+            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volume,
+            COALESCE(SUM(CASE WHEN fv.tipo_receita IN ('VENDA_FIRME','DEVOLUCAO') THEN fv.valor_pendente ELSE 0 END), 0) AS venda_firme,
+            COALESCE(SUM(CASE WHEN fv.tipo_receita = 'FORECAST' THEN fv.valor_pendente ELSE 0 END), 0) AS forecast,
+            COALESCE(SUM(CASE WHEN fv.tipo_receita = 'NOVO_PROJETO' THEN fv.valor_pendente ELSE 0 END), 0) AS novo_projeto
+        FROM dbo.fato_vendas fv
+        {clause}
+        GROUP BY FORMAT(fv.dt_entrega_cliente, 'yyyy-MM')
+        ORDER BY FORMAT(fv.dt_entrega_cliente, 'yyyy-MM')
+        """,
+        params,
+    )
+    return [
+        {
             "mes": row.mes,
-            "valorMeta": _serialize_decimal(row.valor_meta),
-            "projeto": row.projeto,
-            "mercadoVendas": row.mercado_vendas,
-            "createdAt": _serialize_datetime(row.created_at),
-            "updatedAt": _serialize_datetime(row.updated_at),
-        })
-
-    cursor.close()
-    conn.close()
-    return metas
+            "faturamento": _dash_number(row.faturamento),
+            "volume": _dash_number(row.volume),
+            "vendaFirme": _dash_number(row.venda_firme),
+            "forecast": _dash_number(row.forecast),
+            "novoProjeto": _dash_number(row.novo_projeto),
+        }
+        for row in rows
+    ]
 
 
-def upsert_meta_2026(
-    nome_vendedor: str,
-    mes: str,
-    valor_meta: float,
-    projeto: str | None = None,
-    mercado_vendas: str | None = None,
-) -> None:
-    conn = get_connection()
-    cursor = conn.cursor()
-
-    cursor.execute(
-        """
-        MERGE dbo.metas_2026 AS target
-        USING (
-            SELECT
-                ? AS nome_vendedor,
-                ? AS mes,
-                ? AS projeto,
-                ? AS mercado_vendas
-        ) AS source
-        ON target.nome_vendedor = source.nome_vendedor
-           AND target.mes = source.mes
-           AND (target.projeto = source.projeto OR (target.projeto IS NULL AND source.projeto IS NULL))
-           AND (target.mercado_vendas = source.mercado_vendas OR (target.mercado_vendas IS NULL AND source.mercado_vendas IS NULL))
-        WHEN MATCHED THEN
-            UPDATE SET
-                valor_meta = ?,
-                updated_at = SYSDATETIME()
-        WHEN NOT MATCHED THEN
-            INSERT (nome_vendedor, mes, valor_meta, projeto, mercado_vendas, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, SYSDATETIME(), SYSDATETIME());
-        """,
-        nome_vendedor,
-        mes,
-        projeto,
-        mercado_vendas,
-        valor_meta,
-        nome_vendedor,
-        mes,
-        valor_meta,
-        projeto,
-        mercado_vendas,
-    )
-
-    conn.commit()
-    cursor.close()
-    conn.close()
-
-
-def delete_meta_2026(meta_id: int) -> None:
-    conn = get_connection()
-    cursor = conn.cursor()
-
-    cursor.execute("DELETE FROM dbo.metas_2026 WHERE id = ?", meta_id)
-
-    conn.commit()
-    cursor.close()
-    conn.close()        
-
-
-
-
-def list_b2b_resumo(ano: str = "2026") -> list[dict]:
-    """
-    Lista resumo mensal da tabela dbo.B2B.
-
-    Observações:
-    - Esta função pressupõe que o app/database.py já tenha get_connection().
-    - A consulta usa somente SELECT e agregações, sem qualquer escrita na B2B.
-    - COALESCE(DTMOV, DTNEG) é usado como data operacional base.
-    - ValorPendente é mantido com o nome original de indicador pendente, não como faturamento.
-    """
-    data_inicio = f"{ano}-01-01"
-    data_fim = f"{int(ano) + 1}-01-01"
-
-    conn = get_connection()
-    cursor = conn.cursor()
-
-    cursor.execute(
-        """
+def list_dashboard_original_evolucao_ano_anterior(filtros: dict | None = None) -> list[dict]:
+    filtros_ant = dict(filtros or {})
+    filtros_ant["dataInicio"] = _dash_shift_year(filtros_ant.get("dataInicio"))
+    filtros_ant["dataFim"] = _dash_shift_year(filtros_ant.get("dataFim"))
+    clause, params = _dash_build_fato_where(filtros_ant)
+    ano_atual = None
+    if (filtros or {}).get("dataInicio"):
+        try:
+            ano_atual = datetime.strptime(str((filtros or {}).get("dataInicio"))[:10], "%Y-%m-%d").year
+        except ValueError:
+            ano_atual = None
+    rows = _dash_fetch_all(
+        f"""
         SELECT
-            CONVERT(char(7), COALESCE(DTMOV, DTNEG), 120) AS ano_mes,
-            COALESCE(VENDEDOR, 'SEM VENDEDOR') AS vendedor,
-            COALESCE(PROJETO, 'SEM PROJETO') AS projeto,
-            COALESCE(AD_MERCADO_VENDAS, 'SEM MERCADO') AS mercado_vendas,
-            SUM(COALESCE(QTDNEG, 0)) AS quantidade_negociada,
-            SUM(COALESCE(QTDENTREGUE, 0)) AS quantidade_entregue,
-            SUM(COALESCE(PESOLIQ, 0)) AS peso_liquido,
-            SUM(COALESCE(ValorPendente, 0)) AS valor_pendente,
-            COUNT(DISTINCT NUNOTA) AS notas,
-            COUNT(DISTINCT CODPARC) AS clientes
-        FROM dbo.B2B
-        WHERE COALESCE(DTMOV, DTNEG) >= ?
-          AND COALESCE(DTMOV, DTNEG) < ?
-        GROUP BY
-            CONVERT(char(7), COALESCE(DTMOV, DTNEG), 120),
-            COALESCE(VENDEDOR, 'SEM VENDEDOR'),
-            COALESCE(PROJETO, 'SEM PROJETO'),
-            COALESCE(AD_MERCADO_VENDAS, 'SEM MERCADO')
-        ORDER BY ano_mes, vendedor, projeto, mercado_vendas;
+            FORMAT(fv.dt_entrega_cliente, 'yyyy-MM') AS mes,
+            COALESCE(SUM(fv.valor_pendente), 0) AS faturamento,
+            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volume
+        FROM dbo.fato_vendas fv
+        {clause}
+        GROUP BY FORMAT(fv.dt_entrega_cliente, 'yyyy-MM')
+        ORDER BY FORMAT(fv.dt_entrega_cliente, 'yyyy-MM')
         """,
-        data_inicio,
-        data_fim,
+        params,
     )
-
-    rows = cursor.fetchall()
-    resumo: list[dict] = []
-
+    result: list[dict] = []
     for row in rows:
-        resumo.append({
-            "anoMes": row.ano_mes,
-            "vendedor": row.vendedor,
-            "projeto": row.projeto,
-            "mercadoVendas": row.mercado_vendas,
-            "quantidadeNegociada": _serialize_decimal(row.quantidade_negociada) or 0,
-            "quantidadeEntregue": _serialize_decimal(row.quantidade_entregue) or 0,
-            "pesoLiquido": _serialize_decimal(row.peso_liquido) or 0,
-            "valorPendente": _serialize_decimal(row.valor_pendente) or 0,
-            "notas": int(row.notas or 0),
-            "clientes": int(row.clientes or 0),
+        mes = row.mes
+        mes_alinhado = f"{ano_atual}-{str(mes).split('-')[1]}" if ano_atual and mes else mes
+        result.append({
+            "mes": mes,
+            "faturamento": _dash_number(row.faturamento),
+            "volume": _dash_number(row.volume),
+            "mesAlinhado": mes_alinhado,
+            "mesOriginal": mes,
         })
-
-    cursor.close()
-    conn.close()
-    return resumo
+    return result
 
 
+def list_dashboard_original_kpis_por_tipo(filtros: dict | None = None) -> list[dict]:
+    clause, params = _dash_build_fato_where(filtros, ignore_tipo_receita=True)
+    rows = _dash_fetch_all(
+        f"""
+        SELECT
+            CASE WHEN fv.tipo_receita = 'DEVOLUCAO' THEN 'VENDA_FIRME' ELSE fv.tipo_receita END AS tipo_receita,
+            COALESCE(SUM(fv.valor_pendente), 0) AS faturamento,
+            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volume,
+            COUNT(DISTINCT fv.cod_parc) AS clientes,
+            COUNT(*) AS registros
+        FROM dbo.fato_vendas fv
+        {clause}
+        GROUP BY CASE WHEN fv.tipo_receita = 'DEVOLUCAO' THEN 'VENDA_FIRME' ELSE fv.tipo_receita END
+        """,
+        params,
+    )
+    return [
+        {
+            "tipoReceita": row.tipo_receita,
+            "faturamento": _dash_number(row.faturamento),
+            "volume": _dash_number(row.volume),
+            "clientes": _dash_int(row.clientes),
+            "registros": _dash_int(row.registros),
+        }
+        for row in rows
+    ]
+
+
+def get_dashboard_original_total_vendas() -> int:
+    row = _dash_fetch_one("SELECT COUNT(*) AS total FROM dbo.fato_vendas")
+    return _dash_int(row.total) if row else 0
+
+
+def get_dashboard_original_orcamento_kpis(filtros: dict | None = None) -> dict:
+    clause, params = _dash_build_orcamento_where(filtros)
+    row = _dash_fetch_one(
+        f"""
+        SELECT
+            COALESCE(SUM(valor_pendente), 0) AS faturamento_total,
+            COALESCE(SUM(qtd_pendente_kg), 0) AS volume_total,
+            COUNT(*) AS total_registros,
+            COUNT(DISTINCT cod_parc) AS clientes_unicos,
+            COUNT(DISTINCT cod_produto) AS produtos_unicos
+        FROM dbo.orcamento_2026
+        {clause}
+        """,
+        params,
+    )
+    return {
+        "faturamentoTotal": _dash_number(row.faturamento_total) if row else 0,
+        "volumeTotal": _dash_number(row.volume_total) if row else 0,
+        "totalRegistros": _dash_int(row.total_registros) if row else 0,
+        "clientesUnicos": _dash_int(row.clientes_unicos) if row else 0,
+        "produtosUnicos": _dash_int(row.produtos_unicos) if row else 0,
+    }
+
+
+def list_dashboard_original_orcamento_mensal(filtros: dict | None = None) -> list[dict]:
+    clause, params = _dash_build_orcamento_where(filtros)
+    rows = _dash_fetch_all(
+        f"""
+        SELECT
+            FORMAT(dt_prev_entrega_embarque, 'yyyy-MM') AS mes,
+            COALESCE(SUM(valor_pendente), 0) AS faturamento,
+            COALESCE(SUM(qtd_pendente_kg), 0) AS volume
+        FROM dbo.orcamento_2026
+        {clause}
+        GROUP BY FORMAT(dt_prev_entrega_embarque, 'yyyy-MM')
+        ORDER BY FORMAT(dt_prev_entrega_embarque, 'yyyy-MM')
+        """,
+        params,
+    )
+    return [{"mes": row.mes, "faturamento": _dash_number(row.faturamento), "volume": _dash_number(row.volume)} for row in rows]
+
+
+def list_dashboard_original_segmentos(filtros: dict | None = None) -> list[dict]:
+    clause, params = _dash_build_fato_where(filtros)
+    rows = _dash_fetch_all(
+        f"""
+        SELECT
+            fv.perfil_parceiro AS segmento,
+            COALESCE(SUM(fv.valor_pendente), 0) AS faturamento,
+            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volume,
+            COUNT(DISTINCT fv.cod_parc) AS clientes,
+            COUNT(DISTINCT fv.cod_produto) AS produtos
+        FROM dbo.fato_vendas fv
+        {clause}
+        GROUP BY fv.perfil_parceiro
+        ORDER BY SUM(fv.valor_pendente) DESC
+        """,
+        params,
+    )
+    return [
+        {
+            "segmento": row.segmento,
+            "faturamento": _dash_number(row.faturamento),
+            "volume": _dash_number(row.volume),
+            "clientes": _dash_int(row.clientes),
+            "produtos": _dash_int(row.produtos),
+        }
+        for row in rows
+    ]
+
+
+def list_dashboard_original_projetos(filtros: dict | None = None) -> list[dict]:
+    clause, params = _dash_build_fato_where(filtros)
+    rows = _dash_fetch_all(
+        f"""
+        SELECT
+            fv.projeto AS projeto,
+            COALESCE(SUM(fv.valor_pendente), 0) AS faturamento,
+            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volume,
+            COUNT(DISTINCT fv.cod_parc) AS clientes
+        FROM dbo.fato_vendas fv
+        {clause}
+        GROUP BY fv.projeto
+        ORDER BY SUM(fv.valor_pendente) DESC
+        """,
+        params,
+    )
+    return [
+        {
+            "projeto": row.projeto,
+            "faturamento": _dash_number(row.faturamento),
+            "volume": _dash_number(row.volume),
+            "clientes": _dash_int(row.clientes),
+        }
+        for row in rows
+    ]
+
+
+def list_dashboard_original_clientes_top(filtros: dict | None = None, limit: int | None = None) -> list[dict]:
+    clause, params = _dash_build_fato_where(filtros)
+    safe_limit = int(limit or 0)
+    top_clause = f"TOP ({max(1, min(safe_limit, 500))}) " if safe_limit > 0 else ""
+    rows = _dash_fetch_all(
+        f"""
+        SELECT {top_clause}
+            fv.cod_parc AS cod_parc,
+            COALESCE(dc.razao_social, fv.RAZAOSOCIAL) AS razao_social,
+            COALESCE(SUM(fv.valor_pendente), 0) AS faturamento,
+            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volume,
+            COUNT(DISTINCT fv.cod_produto) AS produtos
+        FROM dbo.fato_vendas fv
+        LEFT JOIN dbo.dim_cliente dc ON fv.cod_parc = dc.cod_parc
+        {clause}
+        GROUP BY fv.cod_parc, dc.razao_social, fv.RAZAOSOCIAL
+        ORDER BY SUM(fv.valor_pendente) DESC
+        """,
+        params,
+    )
+    return [
+        {
+            "codParc": _dash_int(row.cod_parc),
+            "razaoSocial": row.razao_social,
+            "faturamento": _dash_number(row.faturamento),
+            "volume": _dash_number(row.volume),
+            "produtos": _dash_int(row.produtos),
+        }
+        for row in rows
+    ]
+
+
+def list_dashboard_original_drilldown(tipo_receita: str, filtros: dict | None = None) -> list[dict]:
+    filtros_tipo = dict(filtros or {})
+    filtros_tipo["tiposReceita"] = [tipo_receita]
+    clause, params = _dash_build_fato_where(filtros_tipo)
+    rows = _dash_fetch_all(
+        f"""
+        SELECT
+            fv.cod_parc AS cod_parc,
+            COALESCE(dc.razao_social, fv.RAZAOSOCIAL) AS razao_social,
+            fv.cod_produto AS cod_produto,
+            COALESCE(dp.nome_produto, fv.nome_produto) AS nome_produto,
+            fv.grupo_produto AS grupo_produto,
+            fv.nome_vendedor AS nome_vendedor,
+            COALESCE(SUM(fv.valor_pendente), 0) AS faturamento,
+            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volume,
+            COUNT(*) AS registros,
+            MAX(CONVERT(VARCHAR, fv.dt_entrega_cliente, 23)) AS dt_prev_entrega
+        FROM dbo.fato_vendas fv
+        LEFT JOIN dbo.dim_cliente dc ON fv.cod_parc = dc.cod_parc
+        LEFT JOIN dbo.dim_produto dp ON fv.cod_produto = dp.cod_produto
+        {clause}
+        GROUP BY fv.cod_parc, dc.razao_social, fv.RAZAOSOCIAL, fv.cod_produto, dp.nome_produto, fv.nome_produto, fv.grupo_produto, fv.nome_vendedor
+        ORDER BY SUM(fv.valor_pendente) DESC
+        """,
+        params,
+    )
+    return [
+        {
+            "codParc": _dash_int(row.cod_parc),
+            "razaoSocial": row.razao_social,
+            "codProduto": _dash_int(row.cod_produto),
+            "nomeProduto": row.nome_produto,
+            "grupoProduto": row.grupo_produto,
+            "nomeVendedor": row.nome_vendedor,
+            "faturamento": _dash_number(row.faturamento),
+            "volume": _dash_number(row.volume),
+            "registros": _dash_int(row.registros),
+            "dtPrevEntrega": row.dt_prev_entrega,
+        }
+        for row in rows
+    ]
+
+
+def list_dashboard_original_cliente_mix(cod_parc: int, filtros: dict | None = None, limit: int = 30) -> list[dict]:
+    filtros_cliente = dict(filtros or {})
+    filtros_cliente["codParc"] = cod_parc
+    clause, params = _dash_build_fato_where(filtros_cliente)
+    safe_limit = max(1, min(int(limit or 30), 200))
+    rows = _dash_fetch_all(
+        f"""
+        SELECT TOP ({safe_limit})
+            fv.cod_produto AS cod_produto,
+            COALESCE(dp.nome_produto, fv.nome_produto) AS nome_produto,
+            fv.grupo_produto AS grupo_produto,
+            COALESCE(SUM(fv.valor_pendente), 0) AS faturamento,
+            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volume
+        FROM dbo.fato_vendas fv
+        LEFT JOIN dbo.dim_produto dp ON fv.cod_produto = dp.cod_produto
+        {clause}
+        GROUP BY fv.cod_produto, dp.nome_produto, fv.nome_produto, fv.grupo_produto
+        ORDER BY SUM(fv.valor_pendente) DESC
+        """,
+        params,
+    )
+    return [
+        {
+            "codProduto": _dash_int(row.cod_produto),
+            "nomeProduto": row.nome_produto,
+            "grupoProduto": row.grupo_produto,
+            "faturamento": _dash_number(row.faturamento),
+            "volume": _dash_number(row.volume),
+        }
+        for row in rows
+    ]
+
+
+def get_dashboard_original_filtros_disponiveis() -> dict:
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT DISTINCT mercado_vendas AS value FROM dbo.fato_vendas WHERE mercado_vendas IS NOT NULL ORDER BY mercado_vendas")
+        mercados = [row.value for row in cursor.fetchall() if row.value]
+        cursor.execute("SELECT DISTINCT nome_vendedor AS value FROM dbo.fato_vendas WHERE nome_vendedor IS NOT NULL ORDER BY nome_vendedor")
+        vendedores = [row.value for row in cursor.fetchall() if row.value]
+        cursor.execute("SELECT DISTINCT projeto AS value FROM dbo.fato_vendas WHERE projeto IS NOT NULL ORDER BY projeto")
+        projetos = [row.value for row in cursor.fetchall() if row.value]
+        cursor.execute("SELECT DISTINCT grupo_produto AS value FROM dbo.fato_vendas WHERE grupo_produto IS NOT NULL ORDER BY grupo_produto")
+        grupos = [row.value for row in cursor.fetchall() if row.value]
+        cursor.execute("SELECT cod_parc AS cod_parc, razao_social AS razao_social FROM dbo.dim_cliente ORDER BY razao_social")
+        clientes = [{"codParc": _dash_int(row.cod_parc), "razaoSocial": row.razao_social} for row in cursor.fetchall()]
+    finally:
+        cursor.close()
+        conn.close()
+    return {"mercados": mercados, "vendedores": vendedores, "projetos": projetos, "grupos": grupos, "clientes": clientes}
+
+
+def get_dashboard_original_resumo(filtros: dict | None = None, limit_clientes: int | None = None) -> dict:
+    return {
+        "kpis": get_dashboard_original_kpis(filtros),
+        "kpisAnoAnterior": get_dashboard_original_kpis_ano_anterior(filtros),
+        "evolucaoMensal": list_dashboard_original_evolucao_mensal(filtros),
+        "evolucaoMensalAnoAnterior": list_dashboard_original_evolucao_ano_anterior(filtros),
+        "kpisPorTipo": list_dashboard_original_kpis_por_tipo(filtros),
+        "totalVendas": get_dashboard_original_total_vendas(),
+        "segmentos": list_dashboard_original_segmentos(filtros),
+        "projetos": list_dashboard_original_projetos(filtros),
+        # Importante: sem limite por padrão. O frontend calcula o percentual usando a soma
+        # da lista recebida, como no backend tRPC original. Limitar aqui infla a participação.
+        "clientesTop": list_dashboard_original_clientes_top(filtros, limit_clientes),
+        "orcamentoKpis": get_dashboard_original_orcamento_kpis(filtros),
+        "orcamentoMensal": list_dashboard_original_orcamento_mensal(filtros),
+    }

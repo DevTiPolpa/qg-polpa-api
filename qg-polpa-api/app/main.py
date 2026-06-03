@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 import jwt
 import secrets
 import bcrypt
-from fastapi import FastAPI, HTTPException, Request, Response, Query
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -17,31 +17,6 @@ from app.database import (
     create_user,
     reset_user_password,
     list_b2b_resumo,
-    get_vendedores_kpis_original,
-    get_vendedores_original_resumo,
-    get_orcamento_kpis_original,
-    list_crm_kpis_por_vendedor_original,
-    list_crm_mapping_vendedores_original,
-    list_metas_vendedores_original,
-    list_orcamento_mensal_original,
-    list_vendedores_clientes_consolidados_original,
-    list_vendedores_evolucao_original,
-    list_vendedores_evolucao_por_tipo_original,
-    list_vendedores_performance_original,
-    get_dashboard_original_filtros_disponiveis,
-    get_dashboard_original_kpis,
-    get_dashboard_original_kpis_ano_anterior,
-    get_dashboard_original_orcamento_kpis,
-    get_dashboard_original_resumo,
-    list_dashboard_original_cliente_mix,
-    list_dashboard_original_clientes_top,
-    list_dashboard_original_drilldown,
-    list_dashboard_original_evolucao_ano_anterior,
-    list_dashboard_original_evolucao_mensal,
-    list_dashboard_original_kpis_por_tipo,
-    list_dashboard_original_orcamento_mensal,
-    list_dashboard_original_projetos,
-    list_dashboard_original_segmentos,
 )
 
 from app.database import (
@@ -523,9 +498,51 @@ def get_b2b_resumo(ano: str = "2026"):
             status_code=500,
             detail=f"Erro ao listar resumo da B2B: {error}",
         )
-    
 
 
+# =============================================================================
+# Imports adicionais para Dashboard Executivo e Por Vendedor originais via REST
+# =============================================================================
+
+from fastapi import Query
+
+from app.database import (
+    get_vendedores_kpis_original,
+    get_vendedores_original_resumo,
+    get_orcamento_kpis_original,
+    list_crm_kpis_por_vendedor_original,
+    list_crm_mapping_vendedores_original,
+    list_metas_vendedores_original,
+    list_orcamento_mensal_original,
+    list_vendedores_cliente_mix_original,
+    list_vendedores_clientes_consolidados_original,
+    list_vendedores_evolucao_original,
+    list_vendedores_evolucao_por_tipo_original,
+    list_vendedores_performance_original,
+)
+
+from app.database import (
+    get_dashboard_original_filtros_disponiveis,
+    get_dashboard_original_kpis,
+    get_dashboard_original_kpis_ano_anterior,
+    get_dashboard_original_orcamento_kpis,
+    get_dashboard_original_resumo,
+    list_dashboard_original_cliente_mix,
+    list_dashboard_original_clientes_top,
+    list_dashboard_original_drilldown,
+    list_dashboard_original_evolucao_ano_anterior,
+    list_dashboard_original_evolucao_mensal,
+    list_dashboard_original_kpis_por_tipo,
+    list_dashboard_original_orcamento_mensal,
+    list_dashboard_original_projetos,
+    list_dashboard_original_segmentos,
+)
+
+
+
+# =============================================================================
+# Por Vendedor — endpoints originais migrados para REST
+# =============================================================================
 
 def _csv_or_list(values: list[str] | None) -> list[str]:
     if not values:
@@ -727,9 +744,35 @@ def api_vendedores_original_crm_mapping():
 
 @app.get("/api/vendedores-original/crm-kpis")
 def api_vendedores_original_crm_kpis():
-    return list_crm_kpis_por_vendedor_original()    
+    return list_crm_kpis_por_vendedor_original()
 
 
+# =============================================================================
+# Por Vendedor — expansão lazy de produtos por cliente
+# =============================================================================
+
+@app.get("/api/vendedores-original/clientes/{cod_parc}/mix")
+def api_vendedores_original_cliente_mix(
+    cod_parc: int,
+    dataInicio: str | None = Query(default="2026-01-01"),
+    dataFim: str | None = Query(default="2026-12-31"),
+    mercados: list[str] | None = Query(default=None),
+    vendedores: list[str] | None = Query(default=None),
+    projetos: list[str] | None = Query(default=None),
+    gruposProduto: list[str] | None = Query(default=None),
+    tiposReceita: list[str] | None = Query(default=None),
+    uf: str | None = None,
+    codProduto: int | None = None,
+):
+    filtros = _build_vendedores_filtros(
+        dataInicio, dataFim, mercados, vendedores, projetos, gruposProduto, tiposReceita, uf, None, codProduto
+    )
+    return list_vendedores_cliente_mix_original(cod_parc, filtros)
+
+
+# =============================================================================
+# Dashboard Executivo — endpoints originais migrados para REST
+# =============================================================================
 
 def _csv_or_list_dashboard(values: list[str] | None) -> list[str]:
     if not values:
@@ -781,7 +824,7 @@ def api_dashboard_original_resumo(
     uf: str | None = None,
     codParc: int | None = None,
     codProduto: int | None = None,
-    limitClientes: int = Query(default=50, ge=1, le=500),
+    limitClientes: int | None = Query(default=None, ge=1, le=500),
 ):
     filtros = _build_dashboard_filtros(
         dataInicio, dataFim, mercados, vendedores, projetos, gruposProduto, tiposReceita, uf, codParc, codProduto
