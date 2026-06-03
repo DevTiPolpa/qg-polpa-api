@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 import jwt
 import secrets
 import bcrypt
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import FastAPI, HTTPException, Request, Response, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -17,6 +17,31 @@ from app.database import (
     create_user,
     reset_user_password,
     list_b2b_resumo,
+    get_vendedores_kpis_original,
+    get_vendedores_original_resumo,
+    get_orcamento_kpis_original,
+    list_crm_kpis_por_vendedor_original,
+    list_crm_mapping_vendedores_original,
+    list_metas_vendedores_original,
+    list_orcamento_mensal_original,
+    list_vendedores_clientes_consolidados_original,
+    list_vendedores_evolucao_original,
+    list_vendedores_evolucao_por_tipo_original,
+    list_vendedores_performance_original,
+    get_dashboard_original_filtros_disponiveis,
+    get_dashboard_original_kpis,
+    get_dashboard_original_kpis_ano_anterior,
+    get_dashboard_original_orcamento_kpis,
+    get_dashboard_original_resumo,
+    list_dashboard_original_cliente_mix,
+    list_dashboard_original_clientes_top,
+    list_dashboard_original_drilldown,
+    list_dashboard_original_evolucao_ano_anterior,
+    list_dashboard_original_evolucao_mensal,
+    list_dashboard_original_kpis_por_tipo,
+    list_dashboard_original_orcamento_mensal,
+    list_dashboard_original_projetos,
+    list_dashboard_original_segmentos,
 )
 
 from app.database import (
@@ -498,3 +523,466 @@ def get_b2b_resumo(ano: str = "2026"):
             status_code=500,
             detail=f"Erro ao listar resumo da B2B: {error}",
         )
+    
+
+
+
+def _csv_or_list(values: list[str] | None) -> list[str]:
+    if not values:
+        return []
+    result: list[str] = []
+    for value in values:
+        for item in str(value).split(","):
+            item = item.strip()
+            if item:
+                result.append(item)
+    return result
+
+
+def _build_vendedores_filtros(
+    dataInicio: str | None = None,
+    dataFim: str | None = None,
+    mercados: list[str] | None = None,
+    vendedores: list[str] | None = None,
+    projetos: list[str] | None = None,
+    gruposProduto: list[str] | None = None,
+    tiposReceita: list[str] | None = None,
+    uf: str | None = None,
+    codParc: int | None = None,
+    codProduto: int | None = None,
+) -> dict:
+    return {
+        "dataInicio": dataInicio or "2026-01-01",
+        "dataFim": dataFim or "2026-12-31",
+        "mercados": _csv_or_list(mercados),
+        "vendedores": _csv_or_list(vendedores),
+        "projetos": _csv_or_list(projetos),
+        "gruposProduto": _csv_or_list(gruposProduto),
+        "tiposReceita": _csv_or_list(tiposReceita),
+        "uf": uf,
+        "codParc": codParc,
+        "codProduto": codProduto,
+    }
+
+
+@app.get("/api/vendedores-original/resumo")
+def api_vendedores_original_resumo(
+    dataInicio: str | None = Query(default="2026-01-01"),
+    dataFim: str | None = Query(default="2026-12-31"),
+    mercados: list[str] | None = Query(default=None),
+    vendedores: list[str] | None = Query(default=None),
+    projetos: list[str] | None = Query(default=None),
+    gruposProduto: list[str] | None = Query(default=None),
+    tiposReceita: list[str] | None = Query(default=None),
+    uf: str | None = None,
+    codParc: int | None = None,
+    codProduto: int | None = None,
+    limitClientes: int = Query(default=50, ge=1, le=500),
+):
+    filtros = _build_vendedores_filtros(
+        dataInicio, dataFim, mercados, vendedores, projetos, gruposProduto, tiposReceita, uf, codParc, codProduto
+    )
+    return get_vendedores_original_resumo(filtros, limitClientes)
+
+
+@app.get("/api/vendedores-original/kpis")
+def api_vendedores_original_kpis(
+    dataInicio: str | None = Query(default="2026-01-01"),
+    dataFim: str | None = Query(default="2026-12-31"),
+    mercados: list[str] | None = Query(default=None),
+    vendedores: list[str] | None = Query(default=None),
+    projetos: list[str] | None = Query(default=None),
+    gruposProduto: list[str] | None = Query(default=None),
+    tiposReceita: list[str] | None = Query(default=None),
+    uf: str | None = None,
+    codParc: int | None = None,
+    codProduto: int | None = None,
+):
+    filtros = _build_vendedores_filtros(
+        dataInicio, dataFim, mercados, vendedores, projetos, gruposProduto, tiposReceita, uf, codParc, codProduto
+    )
+    return get_vendedores_kpis_original(filtros)
+
+
+@app.get("/api/vendedores-original/performance")
+def api_vendedores_original_performance(
+    dataInicio: str | None = Query(default="2026-01-01"),
+    dataFim: str | None = Query(default="2026-12-31"),
+    mercados: list[str] | None = Query(default=None),
+    vendedores: list[str] | None = Query(default=None),
+    projetos: list[str] | None = Query(default=None),
+    gruposProduto: list[str] | None = Query(default=None),
+    tiposReceita: list[str] | None = Query(default=None),
+    uf: str | None = None,
+    codParc: int | None = None,
+    codProduto: int | None = None,
+):
+    filtros = _build_vendedores_filtros(
+        dataInicio, dataFim, mercados, vendedores, projetos, gruposProduto, tiposReceita, uf, codParc, codProduto
+    )
+    return list_vendedores_performance_original(filtros)
+
+
+@app.get("/api/vendedores-original/evolucao")
+def api_vendedores_original_evolucao(
+    dataInicio: str | None = Query(default="2026-01-01"),
+    dataFim: str | None = Query(default="2026-12-31"),
+    mercados: list[str] | None = Query(default=None),
+    vendedores: list[str] | None = Query(default=None),
+    projetos: list[str] | None = Query(default=None),
+    gruposProduto: list[str] | None = Query(default=None),
+    tiposReceita: list[str] | None = Query(default=None),
+    uf: str | None = None,
+    codParc: int | None = None,
+    codProduto: int | None = None,
+):
+    filtros = _build_vendedores_filtros(
+        dataInicio, dataFim, mercados, vendedores, projetos, gruposProduto, tiposReceita, uf, codParc, codProduto
+    )
+    return list_vendedores_evolucao_original(filtros)
+
+
+@app.get("/api/vendedores-original/evolucao-por-tipo")
+def api_vendedores_original_evolucao_por_tipo(
+    dataInicio: str | None = Query(default="2026-01-01"),
+    dataFim: str | None = Query(default="2026-12-31"),
+    mercados: list[str] | None = Query(default=None),
+    vendedores: list[str] | None = Query(default=None),
+    projetos: list[str] | None = Query(default=None),
+    gruposProduto: list[str] | None = Query(default=None),
+    uf: str | None = None,
+    codParc: int | None = None,
+    codProduto: int | None = None,
+):
+    filtros = _build_vendedores_filtros(
+        dataInicio, dataFim, mercados, vendedores, projetos, gruposProduto, None, uf, codParc, codProduto
+    )
+    return list_vendedores_evolucao_por_tipo_original(filtros)
+
+
+@app.get("/api/vendedores-original/clientes-consolidados")
+def api_vendedores_original_clientes_consolidados(
+    dataInicio: str | None = Query(default="2026-01-01"),
+    dataFim: str | None = Query(default="2026-12-31"),
+    mercados: list[str] | None = Query(default=None),
+    vendedores: list[str] | None = Query(default=None),
+    projetos: list[str] | None = Query(default=None),
+    gruposProduto: list[str] | None = Query(default=None),
+    tiposReceita: list[str] | None = Query(default=None),
+    uf: str | None = None,
+    codParc: int | None = None,
+    codProduto: int | None = None,
+    limit: int = Query(default=50, ge=1, le=500),
+):
+    filtros = _build_vendedores_filtros(
+        dataInicio, dataFim, mercados, vendedores, projetos, gruposProduto, tiposReceita, uf, codParc, codProduto
+    )
+    return list_vendedores_clientes_consolidados_original(filtros, limit)
+
+
+@app.get("/api/vendedores-original/metas")
+def api_vendedores_original_metas(
+    mercados: list[str] | None = Query(default=None),
+    vendedores: list[str] | None = Query(default=None),
+    projetos: list[str] | None = Query(default=None),
+):
+    filtros = _build_vendedores_filtros(
+        None, None, mercados, vendedores, projetos, None, None, None, None, None
+    )
+    return list_metas_vendedores_original(filtros)
+
+
+@app.get("/api/vendedores-original/orcamento-kpis")
+def api_vendedores_original_orcamento_kpis(
+    dataInicio: str | None = Query(default="2026-01-01"),
+    dataFim: str | None = Query(default="2026-12-31"),
+    mercados: list[str] | None = Query(default=None),
+    projetos: list[str] | None = Query(default=None),
+    gruposProduto: list[str] | None = Query(default=None),
+):
+    filtros = _build_vendedores_filtros(
+        dataInicio, dataFim, mercados, None, projetos, gruposProduto, None, None, None, None
+    )
+    return get_orcamento_kpis_original(filtros)
+
+
+@app.get("/api/vendedores-original/orcamento-mensal")
+def api_vendedores_original_orcamento_mensal(
+    dataInicio: str | None = Query(default="2026-01-01"),
+    dataFim: str | None = Query(default="2026-12-31"),
+    mercados: list[str] | None = Query(default=None),
+    projetos: list[str] | None = Query(default=None),
+    gruposProduto: list[str] | None = Query(default=None),
+):
+    filtros = _build_vendedores_filtros(
+        dataInicio, dataFim, mercados, None, projetos, gruposProduto, None, None, None, None
+    )
+    return list_orcamento_mensal_original(filtros)
+
+
+@app.get("/api/vendedores-original/crm-mapping")
+def api_vendedores_original_crm_mapping():
+    return list_crm_mapping_vendedores_original()
+
+
+@app.get("/api/vendedores-original/crm-kpis")
+def api_vendedores_original_crm_kpis():
+    return list_crm_kpis_por_vendedor_original()    
+
+
+
+def _csv_or_list_dashboard(values: list[str] | None) -> list[str]:
+    if not values:
+        return []
+    result: list[str] = []
+    for value in values:
+        for item in str(value).split(","):
+            item = item.strip()
+            if item:
+                result.append(item)
+    return result
+
+
+def _build_dashboard_filtros(
+    dataInicio: str | None = None,
+    dataFim: str | None = None,
+    mercados: list[str] | None = None,
+    vendedores: list[str] | None = None,
+    projetos: list[str] | None = None,
+    gruposProduto: list[str] | None = None,
+    tiposReceita: list[str] | None = None,
+    uf: str | None = None,
+    codParc: int | None = None,
+    codProduto: int | None = None,
+) -> dict:
+    return {
+        "dataInicio": dataInicio or "2026-01-01",
+        "dataFim": dataFim or "2026-12-31",
+        "mercados": _csv_or_list_dashboard(mercados),
+        "vendedores": _csv_or_list_dashboard(vendedores),
+        "projetos": _csv_or_list_dashboard(projetos),
+        "gruposProduto": _csv_or_list_dashboard(gruposProduto),
+        "tiposReceita": _csv_or_list_dashboard(tiposReceita),
+        "uf": uf,
+        "codParc": codParc,
+        "codProduto": codProduto,
+    }
+
+
+@app.get("/api/dashboard-original/resumo")
+def api_dashboard_original_resumo(
+    dataInicio: str | None = Query(default="2026-01-01"),
+    dataFim: str | None = Query(default="2026-12-31"),
+    mercados: list[str] | None = Query(default=None),
+    vendedores: list[str] | None = Query(default=None),
+    projetos: list[str] | None = Query(default=None),
+    gruposProduto: list[str] | None = Query(default=None),
+    tiposReceita: list[str] | None = Query(default=None),
+    uf: str | None = None,
+    codParc: int | None = None,
+    codProduto: int | None = None,
+    limitClientes: int = Query(default=50, ge=1, le=500),
+):
+    filtros = _build_dashboard_filtros(
+        dataInicio, dataFim, mercados, vendedores, projetos, gruposProduto, tiposReceita, uf, codParc, codProduto
+    )
+    return get_dashboard_original_resumo(filtros, limitClientes)
+
+
+@app.get("/api/dashboard-original/kpis")
+def api_dashboard_original_kpis(
+    dataInicio: str | None = Query(default="2026-01-01"),
+    dataFim: str | None = Query(default="2026-12-31"),
+    mercados: list[str] | None = Query(default=None),
+    vendedores: list[str] | None = Query(default=None),
+    projetos: list[str] | None = Query(default=None),
+    gruposProduto: list[str] | None = Query(default=None),
+    tiposReceita: list[str] | None = Query(default=None),
+    uf: str | None = None,
+    codParc: int | None = None,
+    codProduto: int | None = None,
+):
+    filtros = _build_dashboard_filtros(
+        dataInicio, dataFim, mercados, vendedores, projetos, gruposProduto, tiposReceita, uf, codParc, codProduto
+    )
+    return get_dashboard_original_kpis(filtros)
+
+
+@app.get("/api/dashboard-original/kpis-ano-anterior")
+def api_dashboard_original_kpis_ano_anterior(
+    dataInicio: str | None = Query(default="2026-01-01"),
+    dataFim: str | None = Query(default="2026-12-31"),
+    mercados: list[str] | None = Query(default=None),
+    vendedores: list[str] | None = Query(default=None),
+    projetos: list[str] | None = Query(default=None),
+    gruposProduto: list[str] | None = Query(default=None),
+    tiposReceita: list[str] | None = Query(default=None),
+    uf: str | None = None,
+    codParc: int | None = None,
+    codProduto: int | None = None,
+):
+    filtros = _build_dashboard_filtros(
+        dataInicio, dataFim, mercados, vendedores, projetos, gruposProduto, tiposReceita, uf, codParc, codProduto
+    )
+    return get_dashboard_original_kpis_ano_anterior(filtros)
+
+
+@app.get("/api/dashboard-original/evolucao-mensal")
+def api_dashboard_original_evolucao_mensal(
+    dataInicio: str | None = Query(default="2026-01-01"),
+    dataFim: str | None = Query(default="2026-12-31"),
+    mercados: list[str] | None = Query(default=None),
+    vendedores: list[str] | None = Query(default=None),
+    projetos: list[str] | None = Query(default=None),
+    gruposProduto: list[str] | None = Query(default=None),
+    tiposReceita: list[str] | None = Query(default=None),
+    uf: str | None = None,
+    codParc: int | None = None,
+    codProduto: int | None = None,
+):
+    filtros = _build_dashboard_filtros(
+        dataInicio, dataFim, mercados, vendedores, projetos, gruposProduto, tiposReceita, uf, codParc, codProduto
+    )
+    return list_dashboard_original_evolucao_mensal(filtros)
+
+
+@app.get("/api/dashboard-original/evolucao-ano-anterior")
+def api_dashboard_original_evolucao_ano_anterior(
+    dataInicio: str | None = Query(default="2026-01-01"),
+    dataFim: str | None = Query(default="2026-12-31"),
+    mercados: list[str] | None = Query(default=None),
+    vendedores: list[str] | None = Query(default=None),
+    projetos: list[str] | None = Query(default=None),
+    gruposProduto: list[str] | None = Query(default=None),
+    tiposReceita: list[str] | None = Query(default=None),
+    uf: str | None = None,
+    codParc: int | None = None,
+    codProduto: int | None = None,
+):
+    filtros = _build_dashboard_filtros(
+        dataInicio, dataFim, mercados, vendedores, projetos, gruposProduto, tiposReceita, uf, codParc, codProduto
+    )
+    return list_dashboard_original_evolucao_ano_anterior(filtros)
+
+
+@app.get("/api/dashboard-original/kpis-por-tipo")
+def api_dashboard_original_kpis_por_tipo(
+    dataInicio: str | None = Query(default="2026-01-01"),
+    dataFim: str | None = Query(default="2026-12-31"),
+    mercados: list[str] | None = Query(default=None),
+    vendedores: list[str] | None = Query(default=None),
+    projetos: list[str] | None = Query(default=None),
+    gruposProduto: list[str] | None = Query(default=None),
+    uf: str | None = None,
+    codParc: int | None = None,
+    codProduto: int | None = None,
+):
+    filtros = _build_dashboard_filtros(
+        dataInicio, dataFim, mercados, vendedores, projetos, gruposProduto, None, uf, codParc, codProduto
+    )
+    return list_dashboard_original_kpis_por_tipo(filtros)
+
+
+@app.get("/api/dashboard-original/orcamento-kpis")
+def api_dashboard_original_orcamento_kpis(
+    dataInicio: str | None = Query(default="2026-01-01"),
+    dataFim: str | None = Query(default="2026-12-31"),
+    mercados: list[str] | None = Query(default=None),
+    projetos: list[str] | None = Query(default=None),
+    gruposProduto: list[str] | None = Query(default=None),
+):
+    filtros = _build_dashboard_filtros(dataInicio, dataFim, mercados, None, projetos, gruposProduto, None)
+    return get_dashboard_original_orcamento_kpis(filtros)
+
+
+@app.get("/api/dashboard-original/orcamento-mensal")
+def api_dashboard_original_orcamento_mensal(
+    dataInicio: str | None = Query(default="2026-01-01"),
+    dataFim: str | None = Query(default="2026-12-31"),
+    mercados: list[str] | None = Query(default=None),
+    projetos: list[str] | None = Query(default=None),
+    gruposProduto: list[str] | None = Query(default=None),
+):
+    filtros = _build_dashboard_filtros(dataInicio, dataFim, mercados, None, projetos, gruposProduto, None)
+    return list_dashboard_original_orcamento_mensal(filtros)
+
+
+@app.get("/api/dashboard-original/segmentos")
+def api_dashboard_original_segmentos(
+    dataInicio: str | None = Query(default="2026-01-01"),
+    dataFim: str | None = Query(default="2026-12-31"),
+    mercados: list[str] | None = Query(default=None),
+    vendedores: list[str] | None = Query(default=None),
+    projetos: list[str] | None = Query(default=None),
+    gruposProduto: list[str] | None = Query(default=None),
+    tiposReceita: list[str] | None = Query(default=None),
+):
+    filtros = _build_dashboard_filtros(dataInicio, dataFim, mercados, vendedores, projetos, gruposProduto, tiposReceita)
+    return list_dashboard_original_segmentos(filtros)
+
+
+@app.get("/api/dashboard-original/projetos")
+def api_dashboard_original_projetos(
+    dataInicio: str | None = Query(default="2026-01-01"),
+    dataFim: str | None = Query(default="2026-12-31"),
+    mercados: list[str] | None = Query(default=None),
+    vendedores: list[str] | None = Query(default=None),
+    projetos: list[str] | None = Query(default=None),
+    gruposProduto: list[str] | None = Query(default=None),
+    tiposReceita: list[str] | None = Query(default=None),
+):
+    filtros = _build_dashboard_filtros(dataInicio, dataFim, mercados, vendedores, projetos, gruposProduto, tiposReceita)
+    return list_dashboard_original_projetos(filtros)
+
+
+@app.get("/api/dashboard-original/clientes-top")
+def api_dashboard_original_clientes_top(
+    dataInicio: str | None = Query(default="2026-01-01"),
+    dataFim: str | None = Query(default="2026-12-31"),
+    mercados: list[str] | None = Query(default=None),
+    vendedores: list[str] | None = Query(default=None),
+    projetos: list[str] | None = Query(default=None),
+    gruposProduto: list[str] | None = Query(default=None),
+    tiposReceita: list[str] | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=500),
+):
+    filtros = _build_dashboard_filtros(dataInicio, dataFim, mercados, vendedores, projetos, gruposProduto, tiposReceita)
+    return list_dashboard_original_clientes_top(filtros, limit)
+
+
+@app.get("/api/dashboard-original/drilldown/{tipo_receita}")
+def api_dashboard_original_drilldown(
+    tipo_receita: str,
+    dataInicio: str | None = Query(default="2026-01-01"),
+    dataFim: str | None = Query(default="2026-12-31"),
+    mercados: list[str] | None = Query(default=None),
+    vendedores: list[str] | None = Query(default=None),
+    projetos: list[str] | None = Query(default=None),
+    gruposProduto: list[str] | None = Query(default=None),
+    uf: str | None = None,
+    codParc: int | None = None,
+    codProduto: int | None = None,
+):
+    filtros = _build_dashboard_filtros(dataInicio, dataFim, mercados, vendedores, projetos, gruposProduto, None, uf, codParc, codProduto)
+    return list_dashboard_original_drilldown(tipo_receita, filtros)
+
+
+@app.get("/api/dashboard-original/clientes/{cod_parc}/mix")
+def api_dashboard_original_cliente_mix(
+    cod_parc: int,
+    dataInicio: str | None = Query(default="2026-01-01"),
+    dataFim: str | None = Query(default="2026-12-31"),
+    mercados: list[str] | None = Query(default=None),
+    vendedores: list[str] | None = Query(default=None),
+    projetos: list[str] | None = Query(default=None),
+    gruposProduto: list[str] | None = Query(default=None),
+    tiposReceita: list[str] | None = Query(default=None),
+    limit: int = Query(default=30, ge=1, le=200),
+):
+    filtros = _build_dashboard_filtros(dataInicio, dataFim, mercados, vendedores, projetos, gruposProduto, tiposReceita)
+    return list_dashboard_original_cliente_mix(cod_parc, filtros, limit)
+
+
+@app.get("/api/dashboard-original/filtros-disponiveis")
+def api_dashboard_original_filtros_disponiveis():
+    return get_dashboard_original_filtros_disponiveis()
