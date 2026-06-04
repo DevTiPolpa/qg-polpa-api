@@ -1954,3 +1954,687 @@ def list_novos_projetos_drilldown(mes: str, filtros: dict | None = None) -> list
         all_params,
     )
     return [_np_row_to_projeto(r) for r in rows]
+
+
+# ============================================================
+# Histórico Clientes / Produtos (/historico-clientes) - API REST
+# ============================================================
+
+
+def _hc_as_list(value):
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        out = []
+        for item in value:
+            if item is None:
+                continue
+            if isinstance(item, str) and "," in item:
+                out.extend([p.strip() for p in item.split(",") if p.strip()])
+            elif str(item).strip() != "":
+                out.append(item)
+        return out
+    if isinstance(value, str) and "," in value:
+        return [p.strip() for p in value.split(",") if p.strip()]
+    return [value] if str(value).strip() != "" else []
+
+
+def _hc_int_list(value):
+    out = []
+    for item in _hc_as_list(value):
+        try:
+            out.append(int(item))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _hc_str_list(value):
+    return [str(item).strip() for item in _hc_as_list(value) if str(item).strip()]
+
+
+def _hc_normalize_filtros(filtros: dict | None = None) -> dict:
+    filtros = filtros or {}
+    current_year = datetime.now().year
+    anos = _hc_int_list(filtros.get("anos")) or [current_year]
+    return {
+        "anos": anos,
+        "meses": _hc_int_list(filtros.get("meses")),
+        "codParcs": _hc_int_list(filtros.get("codParcs")),
+        "mercados": _hc_str_list(filtros.get("mercados")),
+        "gruposProduto": _hc_str_list(filtros.get("gruposProduto")),
+        "vendedores": _hc_str_list(filtros.get("vendedores")),
+        "ufs": _hc_str_list(filtros.get("ufs")),
+        "codProdutos": _hc_str_list(filtros.get("codProdutos")),
+    }
+
+
+def _hc_add_in_clause(parts: list[str], params: list, column: str, values: list):
+    if not values:
+        return
+    placeholders = ", ".join(["?"] * len(values))
+    parts.append(f"{column} IN ({placeholders})")
+    params.extend(values)
+
+
+def _hc_build_where(filtros: dict | None = None, alias: str = "fv") -> tuple[str, tuple]:
+    f = _hc_normalize_filtros(filtros)
+    parts = [
+        f"{alias}.tipo_receita IN ('VENDA_FIRME', 'DEVOLUCAO')",
+        f"({alias}.cod_top IS NULL OR {alias}.cod_top != 1023)",
+        f"({alias}.[top] IS NULL OR {alias}.[top] NOT LIKE '%ESTOQUE MINIM%')",
+        f"{alias}.dt_entrega_cliente IS NOT NULL",
+    ]
+    params: list = []
+
+    _hc_add_in_clause(parts, params, f"YEAR({alias}.dt_entrega_cliente)", f["anos"])
+    _hc_add_in_clause(parts, params, f"MONTH({alias}.dt_entrega_cliente)", f["meses"])
+    _hc_add_in_clause(parts, params, f"{alias}.cod_parc", f["codParcs"])
+    _hc_add_in_clause(parts, params, f"{alias}.mercado_vendas", f["mercados"])
+    _hc_add_in_clause(parts, params, f"{alias}.grupo_produto", f["gruposProduto"])
+    _hc_add_in_clause(parts, params, f"{alias}.nome_vendedor", f["vendedores"])
+    _hc_add_in_clause(parts, params, f"{alias}.uf", f["ufs"])
+    _hc_add_in_clause(parts, params, f"CAST({alias}.cod_produto AS NVARCHAR(50))", f["codProdutos"])
+
+    return "WHERE " + " AND ".join(parts), tuple(params)
+
+
+def _hc_number(value, default: float = 0.0) -> float:
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _hc_int(value, default: int = 0) -> int:
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _hc_iso(value):
+    if value is None:
+        return None
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return str(value)
+
+
+def get_historico_clientes_filtros() -> dict:
+    anos = fetch_all(
+        """
+        SELECT DISTINCT YEAR(dt_entrega_cliente) AS ano
+        FROM fato_vendas
+        WHERE dt_entrega_cliente IS NOT NULL
+          AND tipo_receita IN ('VENDA_FIRME','DEVOLUCAO')
+          AND (cod_top IS NULL OR cod_top != 1023)
+          AND ([top] IS NULL OR [top] NOT LIKE '%ESTOQUE MINIM%')
+        ORDER BY ano DESC
+        """
+    )
+    clientes = fetch_all(
+        """
+        SELECT
+            fv.cod_parc AS codParc,
+            COALESCE(MAX(dc.razao_social), MAX(fv.RAZAOSOCIAL)) AS razaoSocial
+        FROM fato_vendas fv
+        LEFT JOIN dim_cliente dc ON fv.cod_parc = dc.cod_parc
+        WHERE fv.tipo_receita IN ('VENDA_FIRME','DEVOLUCAO')
+          AND (fv.cod_top IS NULL OR fv.cod_top != 1023)
+          AND (fv.[top] IS NULL OR fv.[top] NOT LIKE '%ESTOQUE MINIM%')
+        GROUP BY fv.cod_parc
+        ORDER BY razaoSocial
+        """
+    )
+    mercados = fetch_all(
+        """
+        SELECT DISTINCT mercado_vendas AS mercado
+        FROM fato_vendas
+        WHERE mercado_vendas IS NOT NULL
+          AND tipo_receita IN ('VENDA_FIRME','DEVOLUCAO')
+          AND (cod_top IS NULL OR cod_top != 1023)
+          AND ([top] IS NULL OR [top] NOT LIKE '%ESTOQUE MINIM%')
+        ORDER BY mercado
+        """
+    )
+    grupos = fetch_all(
+        """
+        SELECT DISTINCT grupo_produto AS grupo
+        FROM fato_vendas
+        WHERE grupo_produto IS NOT NULL
+          AND tipo_receita IN ('VENDA_FIRME','DEVOLUCAO')
+          AND (cod_top IS NULL OR cod_top != 1023)
+          AND ([top] IS NULL OR [top] NOT LIKE '%ESTOQUE MINIM%')
+        ORDER BY grupo
+        """
+    )
+    vendedores = fetch_all(
+        """
+        SELECT DISTINCT nome_vendedor AS vendedor
+        FROM fato_vendas
+        WHERE nome_vendedor IS NOT NULL
+          AND tipo_receita IN ('VENDA_FIRME','DEVOLUCAO')
+          AND (cod_top IS NULL OR cod_top != 1023)
+          AND ([top] IS NULL OR [top] NOT LIKE '%ESTOQUE MINIM%')
+        ORDER BY vendedor
+        """
+    )
+
+    return {
+        "anos": [_hc_int(r.get("ano")) for r in anos],
+        "clientes": [
+            {"codParc": _hc_int(r.get("codParc")), "razaoSocial": r.get("razaoSocial") or ""}
+            for r in clientes
+        ],
+        "mercados": [r.get("mercado") for r in mercados if r.get("mercado")],
+        "gruposProduto": [r.get("grupo") for r in grupos if r.get("grupo")],
+        "vendedores": [r.get("vendedor") for r in vendedores if r.get("vendedor")],
+    }
+
+
+def get_historico_clientes_kpis(filtros: dict | None = None) -> dict:
+    clause, params = _hc_build_where(filtros)
+    f = _hc_normalize_filtros(filtros)
+    base_filtros = {
+        "anos": f["anos"],
+        "meses": f["meses"],
+        "mercados": f["mercados"],
+        "gruposProduto": f["gruposProduto"],
+        "vendedores": f["vendedores"],
+    }
+    base_clause, base_params = _hc_build_where(base_filtros)
+
+    main_rows = fetch_all(
+        f"""
+        SELECT
+            COALESCE(SUM(fv.valor_pendente), 0) AS totalValor,
+            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS totalVolume,
+            CASE WHEN COALESCE(SUM(fv.qtd_pendente_kg), 0) > 0
+                THEN SUM(fv.valor_pendente) / SUM(fv.qtd_pendente_kg)
+                ELSE 0 END AS precoMedio,
+            COUNT(DISTINCT fv.cod_produto) AS qtdProdutos,
+            COUNT(DISTINCT fv.cod_parc) AS qtdClientes
+        FROM fato_vendas fv
+        {clause}
+        """,
+        params,
+    )
+    base_rows = fetch_all(
+        f"""
+        SELECT
+            COALESCE(SUM(fv.valor_pendente), 0) AS totalValor,
+            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS totalVolume
+        FROM fato_vendas fv
+        {base_clause}
+        """,
+        base_params,
+    )
+
+    row = main_rows[0] if main_rows else {}
+    base = base_rows[0] if base_rows else {}
+    total_valor = _hc_number(row.get("totalValor"))
+    total_volume = _hc_number(row.get("totalVolume"))
+    base_valor = _hc_number(base.get("totalValor"))
+    base_volume = _hc_number(base.get("totalVolume"))
+
+    return {
+        "totalValor": total_valor,
+        "totalVolume": total_volume,
+        "precoMedio": _hc_number(row.get("precoMedio")),
+        "qtdProdutos": _hc_int(row.get("qtdProdutos")),
+        "qtdClientes": _hc_int(row.get("qtdClientes")),
+        "pctFaturamento": (total_valor / base_valor * 100) if base_valor > 0 else 100,
+        "pctVolume": (total_volume / base_volume * 100) if base_volume > 0 else 100,
+    }
+
+
+def list_historico_clientes(filtros: dict | None = None) -> list[dict]:
+    clause, params = _hc_build_where(filtros)
+    rows = fetch_all(
+        f"""
+        SELECT
+            fv.cod_parc AS codParc,
+            COALESCE(MAX(dc.razao_social), MAX(fv.RAZAOSOCIAL)) AS razaoSocial,
+            COALESCE(SUM(fv.valor_pendente), 0) AS valor,
+            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volume,
+            CASE WHEN COALESCE(SUM(fv.qtd_pendente_kg), 0) > 0
+                THEN SUM(fv.valor_pendente) / SUM(fv.qtd_pendente_kg)
+                ELSE 0 END AS precoMedio,
+            COUNT(DISTINCT fv.cod_produto) AS qtdProdutos
+        FROM fato_vendas fv
+        LEFT JOIN dim_cliente dc ON fv.cod_parc = dc.cod_parc
+        {clause}
+        GROUP BY fv.cod_parc
+        ORDER BY SUM(fv.valor_pendente) DESC
+        """,
+        params,
+    )
+    total_valor = sum(_hc_number(r.get("valor")) for r in rows)
+    total_volume = sum(_hc_number(r.get("volume")) for r in rows)
+    return [
+        {
+            "codParc": _hc_int(r.get("codParc")),
+            "razaoSocial": r.get("razaoSocial") or "",
+            "valor": _hc_number(r.get("valor")),
+            "volume": _hc_number(r.get("volume")),
+            "precoMedio": _hc_number(r.get("precoMedio")),
+            "qtdProdutos": _hc_int(r.get("qtdProdutos")),
+            "pctValor": (_hc_number(r.get("valor")) / total_valor * 100) if total_valor > 0 else 0,
+            "pctVolume": (_hc_number(r.get("volume")) / total_volume * 100) if total_volume > 0 else 0,
+        }
+        for r in rows
+    ]
+
+
+def list_historico_clientes_evolucao_mensal(filtros: dict | None = None) -> list[dict]:
+    clause, params = _hc_build_where(filtros)
+    rows = fetch_all(
+        f"""
+        SELECT
+            MONTH(fv.dt_entrega_cliente) AS mes,
+            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volume,
+            CASE WHEN COALESCE(SUM(fv.qtd_pendente_kg), 0) > 0
+                THEN SUM(fv.valor_pendente) / SUM(fv.qtd_pendente_kg)
+                ELSE 0 END AS precoMedio,
+            COALESCE(SUM(fv.valor_pendente), 0) AS valor
+        FROM fato_vendas fv
+        {clause}
+        GROUP BY MONTH(fv.dt_entrega_cliente)
+        ORDER BY mes
+        """,
+        params,
+    )
+    return [
+        {
+            "mes": _hc_int(r.get("mes")),
+            "volume": _hc_number(r.get("volume")),
+            "precoMedio": _hc_number(r.get("precoMedio")),
+            "valor": _hc_number(r.get("valor")),
+        }
+        for r in rows
+    ]
+
+
+def list_historico_clientes_por_estado(filtros: dict | None = None) -> list[dict]:
+    clause, params = _hc_build_where(filtros)
+    rows = fetch_all(
+        f"""
+        SELECT
+            fv.uf AS uf,
+            COALESCE(SUM(fv.valor_pendente), 0) AS valor,
+            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volume
+        FROM fato_vendas fv
+        {clause}
+        GROUP BY fv.uf
+        ORDER BY valor DESC
+        """,
+        params,
+    )
+    filtered = [r for r in rows if r.get("uf")]
+    total = sum(_hc_number(r.get("valor")) for r in filtered)
+    return [
+        {
+            "uf": r.get("uf"),
+            "valor": _hc_number(r.get("valor")),
+            "volume": _hc_number(r.get("volume")),
+            "pct": (_hc_number(r.get("valor")) / total * 100) if total > 0 else 0,
+        }
+        for r in filtered
+    ]
+
+
+def list_historico_clientes_por_segmento(filtros: dict | None = None) -> list[dict]:
+    clause, params = _hc_build_where(filtros)
+    rows = fetch_all(
+        f"""
+        SELECT
+            fv.grupo_produto AS segmento,
+            COALESCE(SUM(fv.valor_pendente), 0) AS valor,
+            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volume
+        FROM fato_vendas fv
+        {clause}
+        GROUP BY fv.grupo_produto
+        ORDER BY valor DESC
+        """,
+        params,
+    )
+    filtered = [r for r in rows if r.get("segmento")]
+    total = sum(_hc_number(r.get("valor")) for r in filtered)
+    return [
+        {
+            "segmento": r.get("segmento"),
+            "valor": _hc_number(r.get("valor")),
+            "volume": _hc_number(r.get("volume")),
+            "pct": (_hc_number(r.get("valor")) / total * 100) if total > 0 else 0,
+        }
+        for r in filtered
+    ]
+
+
+def list_historico_cliente_produtos(cod_parc: int, filtros: dict | None = None) -> list[dict]:
+    f = dict(filtros or {})
+    f["codParcs"] = [cod_parc]
+    clause, params = _hc_build_where(f)
+    rows = fetch_all(
+        f"""
+        SELECT
+            CAST(fv.cod_produto AS NVARCHAR(50)) AS codProduto,
+            COALESCE(MAX(dp.nome_produto), MAX(fv.nome_produto), CAST(fv.cod_produto AS NVARCHAR(50))) AS nomeProduto,
+            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volume,
+            COALESCE(SUM(fv.valor_pendente), 0) AS valor,
+            CASE WHEN COALESCE(SUM(fv.qtd_pendente_kg), 0) > 0
+                THEN COALESCE(SUM(fv.valor_pendente), 0) / SUM(fv.qtd_pendente_kg)
+                ELSE 0 END AS precoMedio,
+            MAX(fv.dt_entrega_cliente) AS dtUltimaCompra
+        FROM fato_vendas fv
+        LEFT JOIN dim_produto dp ON fv.cod_produto = dp.cod_produto
+        {clause}
+        GROUP BY fv.cod_produto
+        ORDER BY volume DESC
+        """,
+        params,
+    )
+    return [
+        {
+            "codProduto": str(r.get("codProduto") or ""),
+            "nomeProduto": r.get("nomeProduto") or str(r.get("codProduto") or ""),
+            "volume": _hc_number(r.get("volume")),
+            "valor": _hc_number(r.get("valor")),
+            "precoMedio": _hc_number(r.get("precoMedio")),
+            "dtUltimaCompra": _hc_iso(r.get("dtUltimaCompra")),
+        }
+        for r in rows
+    ]
+
+
+# =============================================================================
+# Comparativo Semanal / Snapshot — dados originais migrados para REST
+# =============================================================================
+
+
+def _date_yyyy_mm_dd(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.strftime("%Y-%m-%d")
+    if hasattr(value, "strftime"):
+        return value.strftime("%Y-%m-%d")
+    return str(value)[:10]
+
+
+def _build_snapshot_hist_where(filtros: dict | None, alias: str = "fs") -> tuple[str, list[Any]]:
+    """Reproduz o buildSnapHistWhere original para forecast_snapshots."""
+    f = _normalize_filtros(filtros)
+    parts: list[str] = []
+    params: list[Any] = []
+
+    if f["dataInicio"]:
+        parts.append(f"{alias}.dt_entrega_cliente >= ?")
+        params.append(f["dataInicio"])
+    if f["dataFim"]:
+        parts.append(f"{alias}.dt_entrega_cliente <= ?")
+        params.append(f["dataFim"])
+
+    for clause in [
+        _build_in_clause(f"{alias}.mercado_vendas", f["mercados"], params),
+        _build_in_clause(f"{alias}.nome_vendedor", f["vendedores"], params),
+        _build_in_clause(f"{alias}.projeto", f["projetos"], params),
+        _build_in_clause(f"{alias}.grupo_produto", f["gruposProduto"], params),
+    ]:
+        if clause:
+            parts.append(clause)
+
+    tipos_receita = f["tiposReceita"]
+    if "VENDA_FIRME" in tipos_receita and "DEVOLUCAO" not in tipos_receita:
+        tipos_receita = [*tipos_receita, "DEVOLUCAO"]
+    clause = _build_in_clause(f"{alias}.tipo_receita", tipos_receita, params)
+    if clause:
+        parts.append(clause)
+
+    if f["codParc"]:
+        parts.append(f"{alias}.cod_parc = ?")
+        params.append(int(f["codParc"]))
+    if f["codProduto"]:
+        parts.append(f"{alias}.cod_produto = ?")
+        params.append(int(f["codProduto"]))
+    if f["uf"]:
+        parts.append(f"{alias}.uf = ?")
+        params.append(f["uf"])
+
+    return ("WHERE " + " AND ".join(parts), params) if parts else ("", params)
+
+
+def get_snapshot_datas() -> list[dict]:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT
+            CONVERT(VARCHAR(10), snapshot_date, 23) AS snapshotDate,
+            COUNT(*) AS totalRows
+        FROM dbo.forecast_snapshots
+        GROUP BY CONVERT(VARCHAR(10), snapshot_date, 23)
+        ORDER BY snapshotDate DESC
+        """
+    )
+    rows = cursor.fetchall()
+    cursor.close()
+    conn.close()
+
+    return [
+        {
+            "snapshotDate": _date_yyyy_mm_dd(row.snapshotDate),
+            "totalRows": _int(row.totalRows),
+        }
+        for row in rows
+    ]
+
+
+def get_snapshot_historico(filtros: dict | None = None) -> dict:
+    snap_clause, snap_params = _build_snapshot_hist_where(filtros, alias="fs")
+    curr_clause, curr_params = build_fato_vendas_where(filtros, alias="fv")
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        f"""
+        SELECT
+            fs.cod_parc AS codParc,
+            MAX(fs.razao_social) AS razaoSocial,
+            CONVERT(VARCHAR(10), fs.snapshot_date, 23) AS snapshotDate,
+            COALESCE(SUM(fs.valor_pendente), 0) AS valor,
+            COALESCE(SUM(fs.qtd_pendente_kg), 0) AS volume
+        FROM dbo.forecast_snapshots fs
+        {snap_clause}
+        GROUP BY fs.cod_parc, fs.snapshot_date
+        """,
+        *snap_params,
+    )
+    snap_rows = cursor.fetchall()
+
+    cursor.execute(
+        f"""
+        SELECT
+            fv.cod_parc AS codParc,
+            COALESCE(MAX(dc.razao_social), MAX(fv.RAZAOSOCIAL)) AS razaoSocial,
+            COALESCE(SUM(fv.valor_pendente), 0) AS valor,
+            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volume,
+            MIN(CONVERT(VARCHAR(10), fv.dt_entrega_cliente, 23)) AS dtEntrega
+        FROM dbo.fato_vendas fv
+        LEFT JOIN dbo.dim_cliente dc ON fv.cod_parc = dc.cod_parc
+        {curr_clause}
+        GROUP BY fv.cod_parc
+        """,
+        *curr_params,
+    )
+    curr_rows = cursor.fetchall()
+    cursor.close()
+    conn.close()
+
+    dates = sorted({_date_yyyy_mm_dd(row.snapshotDate) for row in snap_rows if _date_yyyy_mm_dd(row.snapshotDate)})
+
+    snap_by_parc: dict[int, dict] = {}
+    for row in snap_rows:
+        cod_parc = _int(row.codParc)
+        snapshot_date = _date_yyyy_mm_dd(row.snapshotDate)
+        if not snapshot_date:
+            continue
+        if cod_parc not in snap_by_parc:
+            snap_by_parc[cod_parc] = {"razao": row.razaoSocial, "byDate": {}}
+        snap_by_parc[cod_parc]["razao"] = row.razaoSocial
+        snap_by_parc[cod_parc]["byDate"][snapshot_date] = {
+            "valor": _number(row.valor),
+            "volume": _number(row.volume),
+        }
+
+    curr_by_parc = {_int(row.codParc): row for row in curr_rows}
+    all_parcs = set(snap_by_parc.keys()) | set(curr_by_parc.keys())
+
+    rows = []
+    for cod_parc in all_parcs:
+        snap = snap_by_parc.get(cod_parc)
+        curr = curr_by_parc.get(cod_parc)
+        rows.append(
+            {
+                "codParc": cod_parc,
+                "razaoSocial": getattr(curr, "razaoSocial", None) if curr else (snap or {}).get("razao") or f"Cliente {cod_parc}",
+                "snapshots": (snap or {}).get("byDate", {}),
+                "currValor": _number(getattr(curr, "valor", 0)) if curr else 0,
+                "currVolume": _number(getattr(curr, "volume", 0)) if curr else 0,
+                "dtEntrega": _date_yyyy_mm_dd(getattr(curr, "dtEntrega", None)) if curr else None,
+            }
+        )
+
+    rows.sort(key=lambda item: item["currValor"], reverse=True)
+    return {"dates": dates, "rows": rows}
+
+
+def get_snapshot_historico_produtos(cod_parc: int, filtros: dict | None = None) -> dict:
+    filtros_com_cliente = {**(filtros or {}), "codParc": cod_parc}
+    snap_clause, snap_params = _build_snapshot_hist_where(filtros_com_cliente, alias="fs")
+    curr_clause, curr_params = build_fato_vendas_where(filtros_com_cliente, alias="fv")
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        f"""
+        SELECT
+            fs.cod_produto AS codProduto,
+            MAX(fs.nome_produto) AS nomeProduto,
+            CONVERT(VARCHAR(10), fs.snapshot_date, 23) AS snapshotDate,
+            COALESCE(SUM(fs.valor_pendente), 0) AS valor,
+            COALESCE(SUM(fs.qtd_pendente_kg), 0) AS volume
+        FROM dbo.forecast_snapshots fs
+        {snap_clause}
+        GROUP BY fs.cod_produto, fs.snapshot_date
+        """,
+        *snap_params,
+    )
+    snap_rows = cursor.fetchall()
+
+    cursor.execute(
+        f"""
+        SELECT
+            fv.cod_produto AS codProduto,
+            COALESCE(MAX(dp.nome_produto), MAX(fv.nome_produto)) AS nomeProduto,
+            COALESCE(SUM(fv.valor_pendente), 0) AS valor,
+            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volume,
+            MIN(CONVERT(VARCHAR(10), fv.dt_entrega_cliente, 23)) AS dtEntrega
+        FROM dbo.fato_vendas fv
+        LEFT JOIN dbo.dim_produto dp ON fv.cod_produto = dp.cod_produto
+        {curr_clause}
+        GROUP BY fv.cod_produto
+        """,
+        *curr_params,
+    )
+    curr_rows = cursor.fetchall()
+    cursor.close()
+    conn.close()
+
+    dates = sorted({_date_yyyy_mm_dd(row.snapshotDate) for row in snap_rows if _date_yyyy_mm_dd(row.snapshotDate)})
+
+    snap_by_prod: dict[int, dict] = {}
+    for row in snap_rows:
+        cod_produto = _int(row.codProduto)
+        snapshot_date = _date_yyyy_mm_dd(row.snapshotDate)
+        if not snapshot_date:
+            continue
+        if cod_produto not in snap_by_prod:
+            snap_by_prod[cod_produto] = {"nome": row.nomeProduto, "byDate": {}}
+        snap_by_prod[cod_produto]["nome"] = row.nomeProduto
+        snap_by_prod[cod_produto]["byDate"][snapshot_date] = {
+            "valor": _number(row.valor),
+            "volume": _number(row.volume),
+        }
+
+    curr_by_prod = {_int(row.codProduto): row for row in curr_rows}
+    all_produtos = set(snap_by_prod.keys()) | set(curr_by_prod.keys())
+
+    rows = []
+    for cod_produto in all_produtos:
+        snap = snap_by_prod.get(cod_produto)
+        curr = curr_by_prod.get(cod_produto)
+        rows.append(
+            {
+                "codProduto": cod_produto,
+                "nomeProduto": getattr(curr, "nomeProduto", None) if curr else (snap or {}).get("nome") or f"Produto {cod_produto}",
+                "snapshots": (snap or {}).get("byDate", {}),
+                "currValor": _number(getattr(curr, "valor", 0)) if curr else 0,
+                "currVolume": _number(getattr(curr, "volume", 0)) if curr else 0,
+                "dtEntrega": _date_yyyy_mm_dd(getattr(curr, "dtEntrega", None)) if curr else None,
+            }
+        )
+
+    rows.sort(key=lambda item: item["currValor"], reverse=True)
+    return {"dates": dates, "rows": rows}
+
+
+def criar_forecast_snapshot() -> dict:
+    snapshot_date = datetime.now().strftime("%Y-%m-%d")
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        INSERT INTO dbo.forecast_snapshots
+            (snapshot_date, cod_parc, razao_social, cod_produto, nome_produto, grupo_produto,
+             projeto, mercado_vendas, nome_vendedor, tipo_receita, uf,
+             valor_pendente, qtd_pendente_kg, dt_entrega_cliente)
+        SELECT
+            ?,
+            fv.cod_parc,
+            COALESCE(dc.razao_social, fv.RAZAOSOCIAL),
+            fv.cod_produto,
+            COALESCE(dp.nome_produto, fv.nome_produto),
+            fv.grupo_produto,
+            fv.projeto,
+            fv.mercado_vendas,
+            fv.nome_vendedor,
+            fv.tipo_receita,
+            fv.uf,
+            COALESCE(SUM(fv.valor_pendente), 0),
+            COALESCE(SUM(fv.qtd_pendente_kg), 0),
+            fv.dt_entrega_cliente
+        FROM dbo.fato_vendas fv
+        LEFT JOIN dbo.dim_cliente dc ON fv.cod_parc = dc.cod_parc
+        LEFT JOIN dbo.dim_produto dp ON fv.cod_produto = dp.cod_produto
+        WHERE (fv.cod_top IS NULL OR fv.cod_top != 1023)
+          AND (fv.[top] IS NULL OR fv.[top] NOT LIKE '%ESTOQUE MINIM%')
+        GROUP BY fv.cod_parc, dc.razao_social, fv.RAZAOSOCIAL, fv.cod_produto,
+                 dp.nome_produto, fv.nome_produto, fv.grupo_produto, fv.projeto,
+                 fv.mercado_vendas, fv.nome_vendedor, fv.tipo_receita, fv.uf,
+                 fv.dt_entrega_cliente
+        """,
+        snapshot_date,
+    )
+    inserted = cursor.rowcount if cursor.rowcount is not None and cursor.rowcount >= 0 else 0
+    conn.commit()
+    cursor.close()
+    conn.close()
+    return {"inserted": inserted, "snapshotDate": snapshot_date}

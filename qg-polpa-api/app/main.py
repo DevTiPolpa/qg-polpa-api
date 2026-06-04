@@ -1180,3 +1180,300 @@ def api_novos_projetos_drilldown(
         dataInicio, dataFim, mercados, vendedores, projetos, gruposProduto, tiposReceita, uf, codParc, codProduto
     )
     return list_novos_projetos_drilldown(mes, filtros)
+
+
+# ============================================================
+# Histórico Clientes / Produtos (/historico-clientes) - API REST
+# ============================================================
+
+from fastapi import Query
+from app.database import (
+    get_historico_clientes_filtros,
+    get_historico_clientes_kpis,
+    list_historico_clientes,
+    list_historico_clientes_evolucao_mensal,
+    list_historico_clientes_por_estado,
+    list_historico_clientes_por_segmento,
+    list_historico_cliente_produtos,
+)
+
+
+def _csv_or_list_historico_clientes(values):
+    if values is None:
+        return []
+    out = []
+    for value in values if isinstance(values, list) else [values]:
+        if value is None:
+            continue
+        for part in str(value).split(","):
+            part = part.strip()
+            if part:
+                out.append(part)
+    return out
+
+
+def _int_csv_or_list_historico_clientes(values):
+    out = []
+    for value in _csv_or_list_historico_clientes(values):
+        try:
+            out.append(int(value))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _build_historico_clientes_filtros(
+    anos,
+    meses,
+    codParcs,
+    mercados,
+    gruposProduto,
+    vendedores,
+    ufs,
+    codProdutos,
+):
+    filtros = {
+        "anos": _int_csv_or_list_historico_clientes(anos),
+        "meses": _int_csv_or_list_historico_clientes(meses),
+        "codParcs": _int_csv_or_list_historico_clientes(codParcs),
+        "mercados": _csv_or_list_historico_clientes(mercados),
+        "gruposProduto": _csv_or_list_historico_clientes(gruposProduto),
+        "vendedores": _csv_or_list_historico_clientes(vendedores),
+        "ufs": _csv_or_list_historico_clientes(ufs),
+        "codProdutos": _csv_or_list_historico_clientes(codProdutos),
+    }
+    return {k: v for k, v in filtros.items() if v}
+
+
+@app.get("/api/historico-clientes/filtros")
+def api_historico_clientes_filtros():
+    return get_historico_clientes_filtros()
+
+
+@app.get("/api/historico-clientes/kpis")
+def api_historico_clientes_kpis(
+    anos: list[int] | None = Query(default=None),
+    meses: list[int] | None = Query(default=None),
+    codParcs: list[int] | None = Query(default=None),
+    mercados: list[str] | None = Query(default=None),
+    gruposProduto: list[str] | None = Query(default=None),
+    vendedores: list[str] | None = Query(default=None),
+    ufs: list[str] | None = Query(default=None),
+    codProdutos: list[str] | None = Query(default=None),
+):
+    filtros = _build_historico_clientes_filtros(anos, meses, codParcs, mercados, gruposProduto, vendedores, ufs, codProdutos)
+    return get_historico_clientes_kpis(filtros)
+
+
+@app.get("/api/historico-clientes/clientes")
+def api_historico_clientes_lista(
+    anos: list[int] | None = Query(default=None),
+    meses: list[int] | None = Query(default=None),
+    codParcs: list[int] | None = Query(default=None),
+    mercados: list[str] | None = Query(default=None),
+    gruposProduto: list[str] | None = Query(default=None),
+    vendedores: list[str] | None = Query(default=None),
+    ufs: list[str] | None = Query(default=None),
+    codProdutos: list[str] | None = Query(default=None),
+):
+    filtros = _build_historico_clientes_filtros(anos, meses, codParcs, mercados, gruposProduto, vendedores, ufs, codProdutos)
+    return list_historico_clientes(filtros)
+
+
+@app.get("/api/historico-clientes/evolucao-mensal")
+def api_historico_clientes_evolucao_mensal(
+    anos: list[int] | None = Query(default=None),
+    meses: list[int] | None = Query(default=None),
+    codParcs: list[int] | None = Query(default=None),
+    mercados: list[str] | None = Query(default=None),
+    gruposProduto: list[str] | None = Query(default=None),
+    vendedores: list[str] | None = Query(default=None),
+    ufs: list[str] | None = Query(default=None),
+    codProdutos: list[str] | None = Query(default=None),
+):
+    filtros = _build_historico_clientes_filtros(anos, meses, codParcs, mercados, gruposProduto, vendedores, ufs, codProdutos)
+    return list_historico_clientes_evolucao_mensal(filtros)
+
+
+@app.get("/api/historico-clientes/por-estado")
+def api_historico_clientes_por_estado(
+    anos: list[int] | None = Query(default=None),
+    meses: list[int] | None = Query(default=None),
+    codParcs: list[int] | None = Query(default=None),
+    mercados: list[str] | None = Query(default=None),
+    gruposProduto: list[str] | None = Query(default=None),
+    vendedores: list[str] | None = Query(default=None),
+    ufs: list[str] | None = Query(default=None),
+    codProdutos: list[str] | None = Query(default=None),
+):
+    filtros = _build_historico_clientes_filtros(anos, meses, codParcs, mercados, gruposProduto, vendedores, ufs, codProdutos)
+    return list_historico_clientes_por_estado(filtros)
+
+
+@app.get("/api/historico-clientes/por-segmento")
+def api_historico_clientes_por_segmento(
+    anos: list[int] | None = Query(default=None),
+    meses: list[int] | None = Query(default=None),
+    codParcs: list[int] | None = Query(default=None),
+    mercados: list[str] | None = Query(default=None),
+    gruposProduto: list[str] | None = Query(default=None),
+    vendedores: list[str] | None = Query(default=None),
+    ufs: list[str] | None = Query(default=None),
+    codProdutos: list[str] | None = Query(default=None),
+):
+    filtros = _build_historico_clientes_filtros(anos, meses, codParcs, mercados, gruposProduto, vendedores, ufs, codProdutos)
+    return list_historico_clientes_por_segmento(filtros)
+
+
+@app.get("/api/historico-clientes/clientes/{cod_parc}/produtos")
+def api_historico_cliente_produtos(
+    cod_parc: int,
+    anos: list[int] | None = Query(default=None),
+    meses: list[int] | None = Query(default=None),
+    mercados: list[str] | None = Query(default=None),
+    gruposProduto: list[str] | None = Query(default=None),
+    vendedores: list[str] | None = Query(default=None),
+):
+    filtros = _build_historico_clientes_filtros(anos, meses, None, mercados, gruposProduto, vendedores, None, None)
+    return list_historico_cliente_produtos(cod_parc, filtros)
+
+
+# ============================================================
+# Comparativo Semanal / Snapshot (/snapshot) - API REST
+# ============================================================
+
+from fastapi import Query
+from app.database import (
+    get_snapshot_datas,
+    get_snapshot_historico,
+    get_snapshot_historico_produtos,
+    criar_forecast_snapshot,
+)
+
+
+def _csv_or_list_snapshot(values):
+    if values is None:
+        return []
+    out = []
+    for value in values if isinstance(values, list) else [values]:
+        if value is None:
+            continue
+        for part in str(value).split(","):
+            part = part.strip()
+            if part:
+                out.append(part)
+    return out
+
+
+def _build_snapshot_filtros(
+    mercados=None,
+    vendedores=None,
+    projetos=None,
+    grupos_produto=None,
+    gruposProduto=None,
+    tipos_receita=None,
+    tiposReceita=None,
+    data_inicio=None,
+    data_fim=None,
+    dataInicio=None,
+    dataFim=None,
+    cod_parc=None,
+    codParc=None,
+    uf=None,
+):
+    filtros = {
+        "mercados": _csv_or_list_snapshot(mercados),
+        "vendedores": _csv_or_list_snapshot(vendedores),
+        "projetos": _csv_or_list_snapshot(projetos),
+        "gruposProduto": _csv_or_list_snapshot(gruposProduto) or _csv_or_list_snapshot(grupos_produto),
+        "tiposReceita": _csv_or_list_snapshot(tiposReceita) or _csv_or_list_snapshot(tipos_receita),
+        "dataInicio": dataInicio or data_inicio,
+        "dataFim": dataFim or data_fim,
+        "codParc": codParc or cod_parc,
+        "uf": uf,
+    }
+    return {key: value for key, value in filtros.items() if value not in (None, [], "")}
+
+
+@app.get("/api/snapshot/datas")
+def api_snapshot_datas():
+    return get_snapshot_datas()
+
+
+@app.get("/api/snapshot/historico")
+def api_snapshot_historico(
+    mercados: list[str] | None = Query(default=None),
+    vendedores: list[str] | None = Query(default=None),
+    projetos: list[str] | None = Query(default=None),
+    grupos_produto: list[str] | None = Query(default=None),
+    gruposProduto: list[str] | None = Query(default=None),
+    tipos_receita: list[str] | None = Query(default=None),
+    tiposReceita: list[str] | None = Query(default=None),
+    data_inicio: str | None = None,
+    data_fim: str | None = None,
+    dataInicio: str | None = None,
+    dataFim: str | None = None,
+    cod_parc: int | None = None,
+    codParc: int | None = None,
+    uf: str | None = None,
+):
+    filtros = _build_snapshot_filtros(
+        mercados=mercados,
+        vendedores=vendedores,
+        projetos=projetos,
+        grupos_produto=grupos_produto,
+        gruposProduto=gruposProduto,
+        tipos_receita=tipos_receita,
+        tiposReceita=tiposReceita,
+        data_inicio=data_inicio,
+        data_fim=data_fim,
+        dataInicio=dataInicio,
+        dataFim=dataFim,
+        cod_parc=cod_parc,
+        codParc=codParc,
+        uf=uf,
+    )
+    return get_snapshot_historico(filtros)
+
+
+@app.get("/api/snapshot/historico-produtos/{cod_parc}")
+def api_snapshot_historico_produtos(
+    cod_parc: int,
+    mercados: list[str] | None = Query(default=None),
+    vendedores: list[str] | None = Query(default=None),
+    projetos: list[str] | None = Query(default=None),
+    grupos_produto: list[str] | None = Query(default=None),
+    gruposProduto: list[str] | None = Query(default=None),
+    tipos_receita: list[str] | None = Query(default=None),
+    tiposReceita: list[str] | None = Query(default=None),
+    data_inicio: str | None = None,
+    data_fim: str | None = None,
+    dataInicio: str | None = None,
+    dataFim: str | None = None,
+    uf: str | None = None,
+):
+    filtros = _build_snapshot_filtros(
+        mercados=mercados,
+        vendedores=vendedores,
+        projetos=projetos,
+        grupos_produto=grupos_produto,
+        gruposProduto=gruposProduto,
+        tipos_receita=tipos_receita,
+        tiposReceita=tiposReceita,
+        data_inicio=data_inicio,
+        data_fim=data_fim,
+        dataInicio=dataInicio,
+        dataFim=dataFim,
+        uf=uf,
+    )
+    return get_snapshot_historico_produtos(cod_parc, filtros)
+
+
+@app.post("/api/snapshot/criar")
+def api_snapshot_criar(request: Request):
+    user = get_current_user_from_request(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Não autenticado")
+    if str(user.get("role", "")).lower() != "admin":
+        raise HTTPException(status_code=403, detail="Acesso restrito a administradores")
+    return criar_forecast_snapshot()
