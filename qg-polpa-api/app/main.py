@@ -1029,3 +1029,154 @@ def api_dashboard_original_cliente_mix(
 @app.get("/api/dashboard-original/filtros-disponiveis")
 def api_dashboard_original_filtros_disponiveis():
     return get_dashboard_original_filtros_disponiveis()
+
+
+# ============================================================
+# Novos Projetos (/projetos) - API REST
+# ============================================================
+
+"""
+Trechos para adicionar em app/main.py.
+
+Cria endpoints REST para a tela "Novos Projetos" (/projetos), equivalentes às
+queries tRPC originais `novosProjetos.kpis`, `porMes`, `lista` e `drilldown`.
+
+Importante:
+1. Copie primeiro as funções de novos_projetos_database_endpoints.py para app/database.py.
+2. Depois copie os imports e rotas abaixo para main.py.
+"""
+
+from fastapi import Query
+
+from app.database import (
+    get_novos_projetos_kpis,
+    list_novos_projetos,
+    list_novos_projetos_drilldown,
+    list_novos_projetos_por_mes,
+)
+
+
+def _csv_or_list_novos_projetos(values: list[str] | None) -> list[str]:
+    if not values:
+        return []
+    result: list[str] = []
+    for value in values:
+        for item in str(value).split(","):
+            item = item.strip()
+            if item:
+                result.append(item)
+    return result
+
+
+def _build_novos_projetos_filtros(
+    dataInicio: str | None = None,
+    dataFim: str | None = None,
+    mercados: list[str] | None = None,
+    vendedores: list[str] | None = None,
+    projetos: list[str] | None = None,
+    gruposProduto: list[str] | None = None,
+    tiposReceita: list[str] | None = None,
+    uf: str | None = None,
+    codParc: int | None = None,
+    codProduto: int | None = None,
+) -> dict:
+    return {
+        "dataInicio": dataInicio or "2026-01-01",
+        "dataFim": dataFim or "2026-12-31",
+        "mercados": _csv_or_list_novos_projetos(mercados),
+        "vendedores": _csv_or_list_novos_projetos(vendedores),
+        # Mantido por compatibilidade de assinatura; o database.py ignora este filtro
+        # porque a tela sempre usa NOVOS PROJETOS e TESTE INDUSTRIAL.
+        "projetos": _csv_or_list_novos_projetos(projetos),
+        "gruposProduto": _csv_or_list_novos_projetos(gruposProduto),
+        "tiposReceita": _csv_or_list_novos_projetos(tiposReceita),
+        "uf": uf,
+        "codParc": codParc,
+        "codProduto": codProduto,
+    }
+
+
+def _normalize_modo_card_novos_projetos(modoCard: str | None) -> str | None:
+    if modoCard in {"abertos", "totais"}:
+        return modoCard
+    return None
+
+
+@app.get("/api/novos-projetos/kpis")
+def api_novos_projetos_kpis(
+    dataInicio: str | None = Query(default="2026-01-01"),
+    dataFim: str | None = Query(default="2026-12-31"),
+    mercados: list[str] | None = Query(default=None),
+    vendedores: list[str] | None = Query(default=None),
+    projetos: list[str] | None = Query(default=None),
+    gruposProduto: list[str] | None = Query(default=None),
+    tiposReceita: list[str] | None = Query(default=None),
+    uf: str | None = None,
+    codParc: int | None = None,
+    codProduto: int | None = None,
+    modoCard: str | None = Query(default=None),
+):
+    filtros = _build_novos_projetos_filtros(
+        dataInicio, dataFim, mercados, vendedores, projetos, gruposProduto, tiposReceita, uf, codParc, codProduto
+    )
+    return get_novos_projetos_kpis(filtros, _normalize_modo_card_novos_projetos(modoCard))
+
+
+@app.get("/api/novos-projetos/por-mes")
+def api_novos_projetos_por_mes(
+    dataInicio: str | None = Query(default="2026-01-01"),
+    dataFim: str | None = Query(default="2026-12-31"),
+    mercados: list[str] | None = Query(default=None),
+    vendedores: list[str] | None = Query(default=None),
+    projetos: list[str] | None = Query(default=None),
+    gruposProduto: list[str] | None = Query(default=None),
+    tiposReceita: list[str] | None = Query(default=None),
+    uf: str | None = None,
+    codParc: int | None = None,
+    codProduto: int | None = None,
+    modoCard: str | None = Query(default=None),
+):
+    filtros = _build_novos_projetos_filtros(
+        dataInicio, dataFim, mercados, vendedores, projetos, gruposProduto, tiposReceita, uf, codParc, codProduto
+    )
+    return list_novos_projetos_por_mes(filtros, _normalize_modo_card_novos_projetos(modoCard))
+
+
+@app.get("/api/novos-projetos/lista")
+def api_novos_projetos_lista(
+    dataInicio: str | None = Query(default="2026-01-01"),
+    dataFim: str | None = Query(default="2026-12-31"),
+    mercados: list[str] | None = Query(default=None),
+    vendedores: list[str] | None = Query(default=None),
+    projetos: list[str] | None = Query(default=None),
+    gruposProduto: list[str] | None = Query(default=None),
+    tiposReceita: list[str] | None = Query(default=None),
+    uf: str | None = None,
+    codParc: int | None = None,
+    codProduto: int | None = None,
+    modoCard: str | None = Query(default=None),
+):
+    filtros = _build_novos_projetos_filtros(
+        dataInicio, dataFim, mercados, vendedores, projetos, gruposProduto, tiposReceita, uf, codParc, codProduto
+    )
+    return list_novos_projetos(filtros, _normalize_modo_card_novos_projetos(modoCard))
+
+
+@app.get("/api/novos-projetos/drilldown")
+def api_novos_projetos_drilldown(
+    mes: str = Query(..., pattern=r"^\d{4}-\d{2}$"),
+    dataInicio: str | None = Query(default="2026-01-01"),
+    dataFim: str | None = Query(default="2026-12-31"),
+    mercados: list[str] | None = Query(default=None),
+    vendedores: list[str] | None = Query(default=None),
+    projetos: list[str] | None = Query(default=None),
+    gruposProduto: list[str] | None = Query(default=None),
+    tiposReceita: list[str] | None = Query(default=None),
+    uf: str | None = None,
+    codParc: int | None = None,
+    codProduto: int | None = None,
+):
+    filtros = _build_novos_projetos_filtros(
+        dataInicio, dataFim, mercados, vendedores, projetos, gruposProduto, tiposReceita, uf, codParc, codProduto
+    )
+    return list_novos_projetos_drilldown(mes, filtros)

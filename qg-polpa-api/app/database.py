@@ -1564,3 +1564,393 @@ def get_dashboard_original_resumo(filtros: dict | None = None, limit_clientes: i
         "orcamentoKpis": get_dashboard_original_orcamento_kpis(filtros),
         "orcamentoMensal": list_dashboard_original_orcamento_mensal(filtros),
     }
+
+
+# ============================================================
+# Novos Projetos (/projetos) - API REST
+# ============================================================
+
+"""
+Trechos para adicionar em app/database.py.
+
+Objetivo: expor, na API Python/FastAPI, as mesmas fontes que a tela original
+"Novos Projetos" (/projetos) usava via tRPC, preservando filtros globais,
+exclusões globais, cálculo de ciclo M1-M12 e formato esperado pelo frontend.
+
+Observação: este arquivo pressupõe que app/database.py já possui get_connection().
+"""
+
+from decimal import Decimal
+from typing import Any
+
+
+def _np_number(value: Any) -> float:
+    if isinstance(value, Decimal):
+        return float(value)
+    return float(value or 0)
+
+
+def _np_int(value: Any) -> int:
+    return int(value or 0)
+
+
+def _np_split_filter(value: str | list[str] | tuple[str, ...] | None) -> list[str]:
+    if value is None:
+        return []
+    raw_values = value if isinstance(value, (list, tuple)) else str(value).split(",")
+    return [str(item).strip() for item in raw_values if str(item).strip()]
+
+
+def _np_build_in_clause(column: str, values: list[str], params: list[Any]) -> str | None:
+    if not values:
+        return None
+    params.extend(values)
+    return f"{column} IN ({','.join(['?'] * len(values))})"
+
+
+def _np_normalize_filtros(filtros: dict | None) -> dict:
+    filtros = filtros or {}
+    return {
+        "mercados": _np_split_filter(filtros.get("mercados") or filtros.get("mercado")),
+        "vendedores": _np_split_filter(filtros.get("vendedores") or filtros.get("vendedor")),
+        # A página Novos Projetos força a fonte para NOVOS PROJETOS/TESTE INDUSTRIAL.
+        # Portanto, não aplicamos filtros["projetos"] para não esvaziar a base.
+        "projetos": [],
+        "gruposProduto": _np_split_filter(filtros.get("gruposProduto") or filtros.get("grupoProduto")),
+        "tiposReceita": _np_split_filter(filtros.get("tiposReceita") or filtros.get("tipoReceita")),
+        "dataInicio": filtros.get("dataInicio"),
+        "dataFim": filtros.get("dataFim"),
+        "codParc": filtros.get("codParc"),
+        "codProduto": filtros.get("codProduto"),
+        "uf": filtros.get("uf"),
+    }
+
+
+def _np_build_fato_where(filtros: dict | None, alias: str = "fv", include_date: bool = True) -> tuple[str, list[Any]]:
+    """Replica o buildWhere original do backend Node/tRPC para a tela Novos Projetos."""
+    f = _np_normalize_filtros(filtros)
+    parts: list[str] = []
+    params: list[Any] = []
+
+    for clause in [
+        _np_build_in_clause(f"{alias}.mercado_vendas", f["mercados"], params),
+        _np_build_in_clause(f"{alias}.nome_vendedor", f["vendedores"], params),
+        _np_build_in_clause(f"{alias}.grupo_produto", f["gruposProduto"], params),
+    ]:
+        if clause:
+            parts.append(clause)
+
+    tipos_receita = f["tiposReceita"]
+    if "VENDA_FIRME" in tipos_receita and "DEVOLUCAO" not in tipos_receita:
+        tipos_receita = [*tipos_receita, "DEVOLUCAO"]
+    clause = _np_build_in_clause(f"{alias}.tipo_receita", tipos_receita, params)
+    if clause:
+        parts.append(clause)
+
+    if include_date and f["dataInicio"]:
+        parts.append(f"{alias}.dt_entrega_cliente >= ?")
+        params.append(f["dataInicio"])
+    if include_date and f["dataFim"]:
+        parts.append(f"{alias}.dt_entrega_cliente <= ?")
+        params.append(f["dataFim"])
+    if f["codParc"]:
+        parts.append(f"{alias}.cod_parc = ?")
+        params.append(int(f["codParc"]))
+    if f["codProduto"]:
+        parts.append(f"{alias}.cod_produto = ?")
+        params.append(int(f["codProduto"]))
+    if f["uf"]:
+        parts.append(f"{alias}.uf = ?")
+        params.append(f["uf"])
+
+    parts.append(f"{alias}.projeto IN ('NOVOS PROJETOS', 'TESTE INDUSTRIAL')")
+    parts.append(f"({alias}.cod_top IS NULL OR {alias}.cod_top != 1023)")
+    parts.append(f"({alias}.[top] IS NULL OR {alias}.[top] NOT LIKE '%ESTOQUE MINIM%')")
+
+    return "WHERE " + " AND ".join(parts), params
+
+
+def _np_fetch_all(sql_text: str, params: list[Any] | None = None) -> list[Any]:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(sql_text, *(params or []))
+    rows = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    return rows
+
+
+def _np_fetch_one(sql_text: str, params: list[Any] | None = None) -> Any:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(sql_text, *(params or []))
+    row = cursor.fetchone()
+    cursor.close()
+    conn.close()
+    return row
+
+
+_NP_PRIMEIROS_SQL = """
+WITH primeiros AS (
+    SELECT cod_parc, cod_produto, MIN(dt_entrega_cliente) AS dt_primeiro
+    FROM dbo.fato_vendas
+    WHERE projeto IN ('NOVOS PROJETOS', 'TESTE INDUSTRIAL')
+      AND dt_entrega_cliente IS NOT NULL
+      AND (cod_top IS NULL OR cod_top != 1023)
+      AND ([top] IS NULL OR [top] NOT LIKE '%ESTOQUE MINIM%')
+    GROUP BY cod_parc, cod_produto
+)
+"""
+
+
+_NP_PROJETO_SELECT = """
+    SELECT
+        fv.cod_parc AS codParc,
+        COALESCE(MAX(dc.razao_social), MAX(fv.RAZAOSOCIAL), CAST(fv.cod_parc AS NVARCHAR(20))) AS razaoSocial,
+        CAST(fv.cod_produto AS VARCHAR(20)) AS codProduto,
+        COALESCE(MAX(dp.nome_produto), MAX(fv.nome_produto), CAST(fv.cod_produto AS NVARCHAR(20))) AS nomeProduto,
+        MAX(fv.nome_vendedor) AS nomeVendedor,
+        FORMAT(MIN(p.dt_primeiro), 'yyyy-MM') AS dtPrimeiro,
+        DATEDIFF(MONTH, MIN(p.dt_primeiro), GETDATE()) + 1 AS mesAtualCiclo,
+        FORMAT(MAX(fv.dt_entrega_cliente), 'yyyy-MM-dd') AS ultimaCompra,
+        COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volumeTotal,
+        COALESCE(SUM(fv.valor_pendente), 0) AS faturamentoTotal,
+        CASE WHEN DATEDIFF(MONTH, MIN(p.dt_primeiro), GETDATE()) + 1 <= 12
+            THEN 'Novo Projeto' ELSE 'Recorrente' END AS status,
+        CASE WHEN MAX(CASE WHEN fv.projeto = 'TESTE INDUSTRIAL' THEN 1 ELSE 0 END) = 1
+            THEN 'TESTE INDUSTRIAL' ELSE 'NOVOS PROJETOS' END AS origem
+    FROM dbo.fato_vendas fv
+    JOIN primeiros p ON fv.cod_parc = p.cod_parc AND fv.cod_produto = p.cod_produto
+    LEFT JOIN dbo.dim_cliente dc ON fv.cod_parc = dc.cod_parc
+    LEFT JOIN dbo.dim_produto dp ON fv.cod_produto = dp.cod_produto
+"""
+
+
+def get_novos_projetos_kpis(filtros: dict | None = None, modo_card: str | None = None) -> dict:
+    f = _np_normalize_filtros(filtros)
+    clause, params = _np_build_fato_where(f)
+
+    d_params: list[Any] = []
+    p_ini_cond = ""
+    p_fim_cond = ""
+    p_ini_condp = ""
+    p_fim_condp = ""
+    if f["dataInicio"]:
+        d_params.append(f["dataInicio"])
+        p_ini_cond = "AND dt_primeiro >= ?"
+        p_ini_condp = "AND p.dt_primeiro >= ?"
+    if f["dataFim"]:
+        d_params.append(f["dataFim"])
+        p_fim_cond = "AND dt_primeiro <= ?"
+        p_fim_condp = "AND p.dt_primeiro <= ?"
+
+    abertos_extra = f"{p_ini_condp} {p_fim_condp}" if modo_card == "abertos" else ""
+    m12_count_cond = "AND DATEDIFF(MONTH, p.dt_primeiro, fv.dt_entrega_cliente) + 1 <= 12" if modo_card != "abertos" else ""
+    m12_fat_cond = "AND DATEDIFF(MONTH, p.dt_primeiro, fv.dt_entrega_cliente) + 1 <= 12" if modo_card == "totais" else ""
+    active_params = [*params, *d_params] if modo_card == "abertos" else params
+
+    r1 = _np_fetch_one(
+        f"""
+        {_NP_PRIMEIROS_SQL}
+        SELECT COUNT(*) AS total FROM primeiros
+        WHERE 1=1 {p_ini_cond} {p_fim_cond}
+        """,
+        d_params,
+    )
+
+    r2 = _np_fetch_one(
+        f"""
+        {_NP_PRIMEIROS_SQL}
+        SELECT COUNT(DISTINCT CAST(fv.cod_parc AS VARCHAR(20)) + '-' + CAST(fv.cod_produto AS VARCHAR(20))) AS total
+        FROM dbo.fato_vendas fv
+        JOIN primeiros p ON fv.cod_parc = p.cod_parc AND fv.cod_produto = p.cod_produto
+        {clause}
+        AND fv.dt_entrega_cliente IS NOT NULL
+        {m12_count_cond}
+        {abertos_extra}
+        """,
+        active_params,
+    )
+
+    if modo_card:
+        r2b = _np_fetch_one(
+            f"""
+            {_NP_PRIMEIROS_SQL}
+            SELECT COALESCE(SUM(fv.valor_pendente), 0) AS faturamento
+            FROM dbo.fato_vendas fv
+            JOIN primeiros p ON fv.cod_parc = p.cod_parc AND fv.cod_produto = p.cod_produto
+            {clause}
+            AND fv.dt_entrega_cliente IS NOT NULL
+            {m12_fat_cond}
+            {abertos_extra}
+            """,
+            active_params,
+        )
+    else:
+        r2b = _np_fetch_one(
+            f"""
+            SELECT COALESCE(SUM(fv.valor_pendente), 0) AS faturamento
+            FROM dbo.fato_vendas fv
+            {clause}
+            AND fv.dt_entrega_cliente IS NOT NULL
+            """,
+            params,
+        )
+
+    r3 = _np_fetch_one(
+        """
+        WITH primeiros AS (
+            SELECT cod_parc, cod_produto, MIN(dt_entrega_cliente) AS dt_primeiro
+            FROM dbo.fato_vendas
+            WHERE projeto IN ('NOVOS PROJETOS', 'TESTE INDUSTRIAL')
+              AND dt_entrega_cliente IS NOT NULL
+              AND (cod_top IS NULL OR cod_top != 1023)
+              AND ([top] IS NULL OR [top] NOT LIKE '%ESTOQUE MINIM%')
+            GROUP BY cod_parc, cod_produto
+        ),
+        elegiveis AS (
+            SELECT cod_parc, cod_produto, dt_primeiro FROM primeiros
+            WHERE DATEDIFF(MONTH, dt_primeiro, GETDATE()) >= 12
+        )
+        SELECT
+            (SELECT COUNT(*) FROM elegiveis) AS total,
+            (SELECT COUNT(*)
+             FROM elegiveis e
+             WHERE EXISTS (
+                SELECT 1 FROM dbo.fato_vendas fv
+                WHERE fv.cod_parc = e.cod_parc AND fv.cod_produto = e.cod_produto
+                  AND fv.dt_entrega_cliente IS NOT NULL
+                  AND DATEDIFF(MONTH, e.dt_primeiro, fv.dt_entrega_cliente) + 1 >= 13
+             )) AS convertidos
+        """,
+        [],
+    )
+
+    projetos_abertos = _np_int(r1.total) if r1 else 0
+    projetos_totais = _np_int(r2.total) if r2 else 0
+    faturamento_total = _np_number(r2b.faturamento) if r2b else 0
+    taxa_total = _np_int(r3.total) if r3 else 0
+    taxa_convertidos = _np_int(r3.convertidos) if r3 else 0
+    taxa_conversao = (taxa_convertidos / taxa_total * 100) if taxa_total else 0
+    ticket_medio = faturamento_total / projetos_totais if projetos_totais else 0
+
+    return {
+        "projetosAbertos": projetos_abertos,
+        "projetosTotais": projetos_totais,
+        "faturamentoTotal": faturamento_total,
+        "taxaConversao": taxa_conversao,
+        "taxaConversaoTotal": taxa_total,
+        "taxaConversaoConvertidos": taxa_convertidos,
+        "ticketMedio": ticket_medio,
+    }
+
+
+def list_novos_projetos_por_mes(filtros: dict | None = None, modo_card: str | None = None) -> list[dict]:
+    f = _np_normalize_filtros(filtros)
+    clause, params = _np_build_fato_where(f)
+    d_params: list[Any] = []
+    p_ini_cond = ""
+    p_fim_cond = ""
+    if f["dataInicio"]:
+        d_params.append(f["dataInicio"])
+        p_ini_cond = "AND p.dt_primeiro >= ?"
+    if f["dataFim"]:
+        d_params.append(f["dataFim"])
+        p_fim_cond = "AND p.dt_primeiro <= ?"
+    extra_cond = f"{p_ini_cond} {p_fim_cond}" if modo_card == "abertos" else ""
+    all_params = [*params, *d_params] if modo_card == "abertos" else params
+
+    rows = _np_fetch_all(
+        f"""
+        {_NP_PRIMEIROS_SQL}
+        SELECT
+            FORMAT(fv.dt_entrega_cliente, 'yyyy-MM') AS mes,
+            COUNT(DISTINCT CAST(fv.cod_parc AS VARCHAR(20)) + '-' + CAST(fv.cod_produto AS VARCHAR(20))) AS projetos,
+            COALESCE(SUM(fv.valor_pendente), 0) AS faturamento
+        FROM dbo.fato_vendas fv
+        JOIN primeiros p ON fv.cod_parc = p.cod_parc AND fv.cod_produto = p.cod_produto
+        {clause}
+        AND fv.dt_entrega_cliente IS NOT NULL
+        AND DATEDIFF(MONTH, p.dt_primeiro, fv.dt_entrega_cliente) + 1 <= 12
+        {extra_cond}
+        GROUP BY FORMAT(fv.dt_entrega_cliente, 'yyyy-MM')
+        ORDER BY FORMAT(fv.dt_entrega_cliente, 'yyyy-MM')
+        """,
+        all_params,
+    )
+    return [
+        {"mes": str(r.mes), "projetos": _np_int(r.projetos), "faturamento": _np_number(r.faturamento)}
+        for r in rows
+    ]
+
+
+def _np_row_to_projeto(row: Any) -> dict:
+    return {
+        "codParc": _np_int(row.codParc),
+        "razaoSocial": str(row.razaoSocial or ""),
+        "codProduto": str(row.codProduto or ""),
+        "nomeProduto": str(row.nomeProduto or ""),
+        "nomeVendedor": str(row.nomeVendedor or ""),
+        "dtPrimeiro": str(row.dtPrimeiro or ""),
+        "mesAtualCiclo": _np_int(row.mesAtualCiclo),
+        "ultimaCompra": str(row.ultimaCompra or ""),
+        "volumeTotal": _np_number(row.volumeTotal),
+        "faturamentoTotal": _np_number(row.faturamentoTotal),
+        "status": str(row.status or ""),
+        "origem": str(row.origem or ""),
+    }
+
+
+def list_novos_projetos(filtros: dict | None = None, modo_card: str | None = None) -> list[dict]:
+    f = _np_normalize_filtros(filtros)
+    clause, params = _np_build_fato_where(f)
+    d_params: list[Any] = []
+    p_ini_cond = ""
+    p_fim_cond = ""
+    if f["dataInicio"]:
+        d_params.append(f["dataInicio"])
+        p_ini_cond = "AND p.dt_primeiro >= ?"
+    if f["dataFim"]:
+        d_params.append(f["dataFim"])
+        p_fim_cond = "AND p.dt_primeiro <= ?"
+    extra_cond = f"{p_ini_cond} {p_fim_cond}" if modo_card == "abertos" else ""
+    all_params = [*params, *d_params] if modo_card == "abertos" else params
+
+    rows = _np_fetch_all(
+        f"""
+        {_NP_PRIMEIROS_SQL}
+        {_NP_PROJETO_SELECT}
+        {clause}
+        AND fv.dt_entrega_cliente IS NOT NULL
+        AND DATEDIFF(MONTH, p.dt_primeiro, fv.dt_entrega_cliente) + 1 <= 12
+        {extra_cond}
+        GROUP BY fv.cod_parc, fv.cod_produto
+        ORDER BY SUM(fv.valor_pendente) DESC
+        """,
+        all_params,
+    )
+    return [_np_row_to_projeto(r) for r in rows]
+
+
+def list_novos_projetos_drilldown(mes: str, filtros: dict | None = None) -> list[dict]:
+    # O drilldown original ignora dataInicio/dataFim e usa apenas o mês clicado.
+    f = dict(filtros or {})
+    f["dataInicio"] = None
+    f["dataFim"] = None
+    clause, params = _np_build_fato_where(f, include_date=False)
+    full_clause = f"{clause} AND FORMAT(fv.dt_entrega_cliente, 'yyyy-MM') = ?"
+    all_params = [*params, mes]
+
+    rows = _np_fetch_all(
+        f"""
+        {_NP_PRIMEIROS_SQL}
+        {_NP_PROJETO_SELECT}
+        {full_clause}
+        AND fv.dt_entrega_cliente IS NOT NULL
+        AND DATEDIFF(MONTH, p.dt_primeiro, fv.dt_entrega_cliente) + 1 <= 12
+        GROUP BY fv.cod_parc, fv.cod_produto
+        ORDER BY SUM(fv.valor_pendente) DESC
+        """,
+        all_params,
+    )
+    return [_np_row_to_projeto(r) for r in rows]
