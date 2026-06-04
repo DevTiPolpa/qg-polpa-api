@@ -1477,3 +1477,105 @@ def api_snapshot_criar(request: Request):
     if str(user.get("role", "")).lower() != "admin":
         raise HTTPException(status_code=403, detail="Acesso restrito a administradores")
     return criar_forecast_snapshot()
+
+
+# =============================================================================
+# Recorrentes R x O — endpoints REST
+# =============================================================================
+
+from app.database import (
+    get_recorrentes_filtros,
+    get_recorrentes_kpis,
+    list_recorrentes_tabela,
+    list_recorrentes_produtos,
+)
+
+
+def _csv_or_list_recorrentes(value):
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        out = []
+        for item in value:
+            if item is None:
+                continue
+            for part in str(item).split(","):
+                part = part.strip()
+                if part:
+                    out.append(part)
+        return out
+    out = []
+    for part in str(value).split(","):
+        part = part.strip()
+        if part:
+            out.append(part)
+    return out
+
+
+def _build_recorrentes_filtros(
+    dataInicio=None,
+    dataFim=None,
+    mercados=None,
+    vendedores=None,
+    codParc=None,
+    data_inicio=None,
+    data_fim=None,
+    cod_parc=None,
+):
+    filtros = {
+        "dataInicio": dataInicio or data_inicio,
+        "dataFim": dataFim or data_fim,
+        "mercados": _csv_or_list_recorrentes(mercados),
+        "vendedores": _csv_or_list_recorrentes(vendedores),
+        "codParc": codParc or cod_parc,
+    }
+    return {key: value for key, value in filtros.items() if value not in (None, [], "")}
+
+
+@app.get("/api/recorrentes/filtros")
+def api_recorrentes_filtros():
+    return get_recorrentes_filtros()
+
+
+@app.get("/api/recorrentes/kpis")
+def api_recorrentes_kpis(
+    dataInicio: str | None = Query(default="2026-01-01"),
+    dataFim: str | None = Query(default="2026-12-31"),
+    mercados: list[str] | None = Query(default=None),
+    vendedores: list[str] | None = Query(default=None),
+    codParc: int | None = None,
+    data_inicio: str | None = None,
+    data_fim: str | None = None,
+    cod_parc: int | None = None,
+):
+    filtros = _build_recorrentes_filtros(dataInicio, dataFim, mercados, vendedores, codParc, data_inicio, data_fim, cod_parc)
+    return get_recorrentes_kpis(filtros)
+
+
+@app.get("/api/recorrentes/tabela")
+def api_recorrentes_tabela(
+    dataInicio: str | None = Query(default="2026-01-01"),
+    dataFim: str | None = Query(default="2026-12-31"),
+    mercados: list[str] | None = Query(default=None),
+    vendedores: list[str] | None = Query(default=None),
+    codParc: int | None = None,
+    data_inicio: str | None = None,
+    data_fim: str | None = None,
+    cod_parc: int | None = None,
+):
+    filtros = _build_recorrentes_filtros(dataInicio, dataFim, mercados, vendedores, codParc, data_inicio, data_fim, cod_parc)
+    return list_recorrentes_tabela(filtros)
+
+
+@app.get("/api/recorrentes/produtos/{cod_parc}")
+def api_recorrentes_produtos(
+    cod_parc: int,
+    dataInicio: str | None = Query(default="2026-01-01"),
+    dataFim: str | None = Query(default="2026-12-31"),
+    mercados: list[str] | None = Query(default=None),
+    vendedores: list[str] | None = Query(default=None),
+    data_inicio: str | None = None,
+    data_fim: str | None = None,
+):
+    filtros = _build_recorrentes_filtros(dataInicio, dataFim, mercados, vendedores, None, data_inicio, data_fim, None)
+    return list_recorrentes_produtos(cod_parc, filtros)

@@ -2638,3 +2638,260 @@ def criar_forecast_snapshot() -> dict:
     cursor.close()
     conn.close()
     return {"inserted": inserted, "snapshotDate": snapshot_date}
+
+
+# =============================================================================
+# Recorrentes R x O — dados originais migrados para REST
+# =============================================================================
+
+
+def _build_recorrentes_real_where(filtros: dict | None, alias: str = "fv") -> tuple[str, list[Any]]:
+    f = _normalize_filtros(filtros)
+    parts: list[str] = [
+        f"{alias}.projeto = 'RECORRENTES'",
+        f"({alias}.cod_top IS NULL OR {alias}.cod_top != 1023)",
+        f"({alias}.[top] IS NULL OR {alias}.[top] NOT LIKE '%ESTOQUE MINIM%')",
+    ]
+    params: list[Any] = []
+
+    if f["dataInicio"]:
+        parts.append(f"{alias}.dt_entrega_cliente >= ?")
+        params.append(f["dataInicio"])
+    if f["dataFim"]:
+        parts.append(f"{alias}.dt_entrega_cliente <= ?")
+        params.append(f["dataFim"])
+    if f["mercados"]:
+        placeholders = ", ".join("?" for _ in f["mercados"])
+        parts.append(f"{alias}.mercado_vendas IN ({placeholders})")
+        params.extend(f["mercados"])
+    if f["vendedores"]:
+        placeholders = ", ".join("?" for _ in f["vendedores"])
+        parts.append(f"{alias}.nome_vendedor IN ({placeholders})")
+        params.extend(f["vendedores"])
+    if f["codParc"] is not None:
+        parts.append(f"{alias}.cod_parc = ?")
+        params.append(f["codParc"])
+
+    return " AND ".join(parts), params
+
+
+def _build_recorrentes_orcamento_where(filtros: dict | None, alias: str = "o") -> tuple[str, list[Any]]:
+    f = _normalize_filtros(filtros)
+    parts: list[str] = [f"{alias}.projeto = 'RECORRENTES'"]
+    params: list[Any] = []
+
+    if f["dataInicio"]:
+        parts.append(f"{alias}.dt_prev_entrega_embarque >= ?")
+        params.append(f["dataInicio"])
+    if f["dataFim"]:
+        parts.append(f"{alias}.dt_prev_entrega_embarque <= ?")
+        params.append(f["dataFim"])
+    if f["mercados"]:
+        placeholders = ", ".join("?" for _ in f["mercados"])
+        parts.append(f"{alias}.mercado_vendas IN ({placeholders})")
+        params.extend(f["mercados"])
+    if f["codParc"] is not None:
+        parts.append(f"{alias}.cod_parc = ?")
+        params.append(f["codParc"])
+
+    return " AND ".join(parts), params
+
+
+def get_recorrentes_kpis(filtros: dict | None = None) -> dict:
+    real_where, real_params = _build_recorrentes_real_where(filtros, alias="fv")
+    orc_where, orc_params = _build_recorrentes_orcamento_where(filtros, alias="o")
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        f"""
+        SELECT
+            COALESCE(SUM(fv.valor_pendente), 0) AS fatAtual,
+            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volAtual
+        FROM dbo.fato_vendas fv
+        WHERE {real_where}
+        """,
+        *real_params,
+    )
+    real_row = cursor.fetchone()
+
+    cursor.execute(
+        f"""
+        SELECT
+            COALESCE(SUM(o.valor_pendente), 0) AS orcVal,
+            COALESCE(SUM(o.qtd_pendente_kg), 0) AS orcKg
+        FROM dbo.orcamento_2026 o
+        WHERE {orc_where}
+        """,
+        *orc_params,
+    )
+    orc_row = cursor.fetchone()
+
+    cursor.close()
+    conn.close()
+
+    return {
+        "fatAtual": _number(getattr(real_row, "fatAtual", 0)),
+        "volAtual": _number(getattr(real_row, "volAtual", 0)),
+        "orcVal": _number(getattr(orc_row, "orcVal", 0)),
+        "orcKg": _number(getattr(orc_row, "orcKg", 0)),
+    }
+
+
+def list_recorrentes_tabela(filtros: dict | None = None) -> list[dict]:
+    real_where, real_params = _build_recorrentes_real_where(filtros, alias="fv")
+    orc_where, orc_params = _build_recorrentes_orcamento_where(filtros, alias="o")
+
+    rows = fetch_all(
+        f"""
+        WITH real_data AS (
+            SELECT
+                fv.cod_parc,
+                MAX(COALESCE(dcr.razao_social, fv.RAZAOSOCIAL)) AS razaoSocial,
+                COALESCE(SUM(fv.valor_pendente), 0) AS fatAtual,
+                COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volAtual
+            FROM dbo.fato_vendas fv
+            LEFT JOIN dbo.dim_cliente dcr ON fv.cod_parc = dcr.cod_parc
+            WHERE {real_where}
+            GROUP BY fv.cod_parc
+        ),
+        orc_data AS (
+            SELECT
+                o.cod_parc,
+                MAX(COALESCE(dco.razao_social, fany.RAZAOSOCIAL)) AS orcRazaoSocial,
+                COALESCE(SUM(o.valor_pendente), 0) AS orcVal,
+                COALESCE(SUM(o.qtd_pendente_kg), 0) AS orcKg
+            FROM dbo.orcamento_2026 o
+            LEFT JOIN dbo.dim_cliente dco ON o.cod_parc = dco.cod_parc
+            LEFT JOIN (
+                SELECT cod_parc, MAX(RAZAOSOCIAL) AS RAZAOSOCIAL
+                FROM dbo.fato_vendas
+                WHERE RAZAOSOCIAL IS NOT NULL
+                GROUP BY cod_parc
+            ) fany ON o.cod_parc = fany.cod_parc
+            WHERE {orc_where}
+            GROUP BY o.cod_parc
+        )
+        SELECT
+            COALESCE(r.cod_parc, od.cod_parc) AS codParc,
+            COALESCE(
+                dc.razao_social,
+                r.razaoSocial,
+                od.orcRazaoSocial,
+                'Cliente ' + CAST(COALESCE(r.cod_parc, od.cod_parc) AS VARCHAR)
+            ) AS razaoSocial,
+            COALESCE(r.volAtual, 0) AS volAtual,
+            COALESCE(od.orcKg, 0) AS orcKg,
+            COALESCE(r.fatAtual, 0) AS fatAtual,
+            COALESCE(od.orcVal, 0) AS orcVal
+        FROM real_data r
+        FULL OUTER JOIN orc_data od ON r.cod_parc = od.cod_parc
+        LEFT JOIN dbo.dim_cliente dc ON COALESCE(r.cod_parc, od.cod_parc) = dc.cod_parc
+        ORDER BY COALESCE(r.volAtual, 0) DESC
+        """,
+        tuple(real_params + orc_params),
+    )
+
+    return [
+        {
+            "codParc": _int(row.get("codParc")),
+            "razaoSocial": row.get("razaoSocial") or f"Cliente {_int(row.get('codParc'))}",
+            "volAtual": _number(row.get("volAtual")),
+            "orcKg": _number(row.get("orcKg")),
+            "fatAtual": _number(row.get("fatAtual")),
+            "orcVal": _number(row.get("orcVal")),
+        }
+        for row in rows
+    ]
+
+
+def list_recorrentes_produtos(cod_parc: int, filtros: dict | None = None) -> list[dict]:
+    filtros_cliente = {**(filtros or {}), "codParc": cod_parc}
+    real_where, real_params = _build_recorrentes_real_where(filtros_cliente, alias="fv")
+    orc_where, orc_params = _build_recorrentes_orcamento_where(filtros_cliente, alias="o")
+
+    rows = fetch_all(
+        f"""
+        WITH real_p AS (
+            SELECT
+                fv.cod_produto,
+                MAX(COALESCE(dp.nome_produto, fv.nome_produto, CAST(fv.cod_produto AS VARCHAR))) AS nomeProduto,
+                COALESCE(SUM(fv.valor_pendente), 0) AS fatAtual,
+                COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volAtual
+            FROM dbo.fato_vendas fv
+            LEFT JOIN dbo.dim_produto dp ON fv.cod_produto = dp.cod_produto
+            WHERE {real_where}
+            GROUP BY fv.cod_produto
+        ),
+        orc_p AS (
+            SELECT
+                o.cod_produto,
+                MAX(COALESCE(dp.nome_produto, fany.nome_produto)) AS orcNomeProduto,
+                COALESCE(SUM(o.valor_pendente), 0) AS orcVal,
+                COALESCE(SUM(o.qtd_pendente_kg), 0) AS orcKg
+            FROM dbo.orcamento_2026 o
+            LEFT JOIN dbo.dim_produto dp ON o.cod_produto = dp.cod_produto
+            LEFT JOIN (
+                SELECT cod_produto, MAX(nome_produto) AS nome_produto
+                FROM dbo.fato_vendas
+                WHERE nome_produto IS NOT NULL
+                GROUP BY cod_produto
+            ) fany ON o.cod_produto = fany.cod_produto
+            WHERE {orc_where}
+            GROUP BY o.cod_produto
+        )
+        SELECT
+            COALESCE(r.cod_produto, op.cod_produto) AS codProduto,
+            COALESCE(
+                r.nomeProduto,
+                op.orcNomeProduto,
+                'Produto ' + CAST(COALESCE(r.cod_produto, op.cod_produto) AS VARCHAR)
+            ) AS nomeProduto,
+            COALESCE(r.volAtual, 0) AS volAtual,
+            COALESCE(op.orcKg, 0) AS orcKg,
+            COALESCE(r.fatAtual, 0) AS fatAtual,
+            COALESCE(op.orcVal, 0) AS orcVal
+        FROM real_p r
+        FULL OUTER JOIN orc_p op ON r.cod_produto = op.cod_produto
+        ORDER BY COALESCE(r.volAtual, 0) DESC
+        """,
+        tuple(real_params + orc_params),
+    )
+
+    return [
+        {
+            "codProduto": _int(row.get("codProduto")),
+            "nomeProduto": row.get("nomeProduto") or f"Produto {_int(row.get('codProduto'))}",
+            "volAtual": _number(row.get("volAtual")),
+            "orcKg": _number(row.get("orcKg")),
+            "fatAtual": _number(row.get("fatAtual")),
+            "orcVal": _number(row.get("orcVal")),
+        }
+        for row in rows
+    ]
+
+
+def get_recorrentes_filtros() -> dict:
+    vendedores = fetch_all(
+        """
+        SELECT DISTINCT nome_vendedor AS nome
+        FROM dbo.fato_vendas
+        WHERE projeto = 'RECORRENTES'
+          AND nome_vendedor IS NOT NULL
+        ORDER BY nome_vendedor
+        """
+    )
+    mercados = fetch_all(
+        """
+        SELECT DISTINCT mercado_vendas AS nome
+        FROM dbo.fato_vendas
+        WHERE projeto = 'RECORRENTES'
+          AND mercado_vendas IS NOT NULL
+        ORDER BY mercado_vendas
+        """
+    )
+    return {
+        "vendedores": [row["nome"] for row in vendedores if row.get("nome")],
+        "mercados": [row["nome"] for row in mercados if row.get("nome")],
+    }
