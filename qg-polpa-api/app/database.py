@@ -2895,3 +2895,579 @@ def get_recorrentes_filtros() -> dict:
         "vendedores": [row["nome"] for row in vendedores if row.get("nome")],
         "mercados": [row["nome"] for row in mercados if row.get("nome")],
     }
+
+# =============================================================================
+# Funil de Vendas — dados CRM migrados para REST
+# =============================================================================
+
+FUNIL_PIPELINE_BLACKLIST = (15, 23, 25)
+FUNIL_PIPELINE_LABELS = {
+    0: "Comercial",
+    31: "Marca Própria - Private Label",
+}
+
+
+def _build_funil_pipeline_filter(column_expr: str, pipeline_ids: list[int] | tuple[int, ...] | None = None) -> tuple[str, tuple]:
+    ids: list[int] = []
+    for value in pipeline_ids or []:
+        try:
+            pipeline_id = int(value)
+        except (TypeError, ValueError):
+            continue
+        if pipeline_id not in FUNIL_PIPELINE_BLACKLIST and pipeline_id not in ids:
+            ids.append(pipeline_id)
+
+    if ids:
+        placeholders = ", ".join("?" for _ in ids)
+        return f"AND {column_expr} IN ({placeholders})", tuple(ids)
+
+    placeholders = ", ".join("?" for _ in FUNIL_PIPELINE_BLACKLIST)
+    return f"AND {column_expr} NOT IN ({placeholders})", tuple(FUNIL_PIPELINE_BLACKLIST)
+
+
+def _build_funil_user_filter(column_expr: str, user_id: int | None = None) -> tuple[str, tuple]:
+    if user_id is None or user_id == "":
+        return "", ()
+    return f"AND {column_expr} = ?", (int(user_id),)
+
+
+def _funil_filters(pipeline_ids: list[int] | tuple[int, ...] | None = None, user_id: int | None = None, alias: str = "") -> tuple[str, tuple]:
+    prefix = f"{alias}." if alias else ""
+    category_expr = f"CAST(COALESCE({prefix}category_id, '0') AS INT)"
+    pipeline_clause, pipeline_params = _build_funil_pipeline_filter(category_expr, pipeline_ids)
+    user_clause, user_params = _build_funil_user_filter(f"{prefix}assigned_by_id", user_id)
+    return f"{pipeline_clause} {user_clause}", pipeline_params + user_params
+
+
+def _funil_pipeline_name_sql(alias: str = "d") -> str:
+    category_expr = f"CAST(COALESCE({alias}.category_id, '0') AS INT)"
+    return (
+        "CASE "
+        f"WHEN {category_expr} = 31 THEN 'Marca Própria - Private Label' "
+        f"WHEN {category_expr} = 0 THEN 'Comercial' "
+        "ELSE COALESCE(p.name, 'Comercial') END"
+    )
+
+
+def list_funil_vendas_vendedores() -> list[dict]:
+    rows = fetch_all(
+        f"""
+        SELECT DISTINCT
+            u.id AS id,
+            LTRIM(RTRIM(u.name + ' ' + COALESCE(u.last_name, ''))) AS nome
+        FROM dbo.crm_users u
+        JOIN dbo.crm_deals d ON d.assigned_by_id = u.id
+        WHERE CAST(COALESCE(d.category_id, '0') AS INT) NOT IN ({', '.join('?' for _ in FUNIL_PIPELINE_BLACKLIST)})
+        ORDER BY nome
+        """,
+        tuple(FUNIL_PIPELINE_BLACKLIST),
+    )
+    return [{"id": _int(row.get("id")), "nome": row.get("nome") or ""} for row in rows]
+
+
+def get_funil_vendas_kpis(pipeline_ids: list[int] | tuple[int, ...] | None = None, user_id: int | None = None) -> list[dict]:
+    filtros, params = _funil_filters(pipeline_ids, user_id)
+    rows = fetch_all(
+        f"""
+        SELECT
+            SUM(CASE WHEN stage_semantic_id = 'P' THEN 1 ELSE 0 END) AS emAndamento,
+            COALESCE(SUM(CASE WHEN stage_semantic_id = 'P' THEN opportunity ELSE 0 END), 0) AS valorPipeline,
+            SUM(CASE WHEN stage_semantic_id = 'S' THEN 1 ELSE 0 END) AS ganhos,
+            COALESCE(SUM(CASE WHEN stage_semantic_id = 'S' THEN opportunity ELSE 0 END), 0) AS valorGanho,
+            SUM(CASE WHEN stage_semantic_id = 'F' THEN 1 ELSE 0 END) AS perdidos,
+            CASE
+                WHEN SUM(CASE WHEN stage_semantic_id IN ('S','F') THEN 1 ELSE 0 END) = 0 THEN 0
+                ELSE CAST(SUM(CASE WHEN stage_semantic_id = 'S' THEN 1 ELSE 0 END) AS FLOAT)
+                    / SUM(CASE WHEN stage_semantic_id IN ('S','F') THEN 1 ELSE 0 END) * 100
+            END AS taxaConversao,
+            COALESCE(AVG(CASE
+                WHEN stage_semantic_id = 'S' AND closedate IS NOT NULL AND date_create IS NOT NULL
+                THEN DATEDIFF(day, TRY_CAST(date_create AS DATE), TRY_CAST(closedate AS DATE))
+                ELSE NULL
+            END), 0) AS diasMedioFechamento
+        FROM dbo.crm_deals
+        WHERE 1 = 1 {filtros}
+        """,
+        params,
+    )
+    row = rows[0] if rows else {}
+    return [{
+        "emAndamento": _int(row.get("emAndamento")),
+        "valorPipeline": _number(row.get("valorPipeline")),
+        "ganhos": _int(row.get("ganhos")),
+        "valorGanho": _number(row.get("valorGanho")),
+        "perdidos": _int(row.get("perdidos")),
+        "taxaConversao": _number(row.get("taxaConversao")),
+        "diasMedioFechamento": _number(row.get("diasMedioFechamento")),
+    }]
+
+
+def list_funil_vendas_por_etapa(pipeline_ids: list[int] | tuple[int, ...] | None = None, user_id: int | None = None) -> list[dict]:
+    filtros, params = _funil_filters(pipeline_ids, user_id, alias="d")
+    pipeline_name = _funil_pipeline_name_sql("d")
+    rows = fetch_all(
+        f"""
+        SELECT
+            ds.name AS etapa,
+            {pipeline_name} AS pipeline,
+            COUNT(*) AS total,
+            COALESCE(SUM(d.opportunity), 0) AS valorTotal,
+            ds.semantic AS semantic,
+            CAST(COALESCE(d.category_id, '0') AS INT) AS pipelineId,
+            ds.status_id AS stageId
+        FROM dbo.crm_deals d
+        LEFT JOIN dbo.crm_deal_stages ds ON d.stage_id = ds.status_id
+        LEFT JOIN dbo.crm_pipelines p ON CAST(COALESCE(d.category_id, '0') AS INT) = p.id
+        WHERE d.stage_semantic_id = 'P'
+          {filtros}
+        GROUP BY ds.name, {pipeline_name}, ds.semantic, CAST(COALESCE(d.category_id, '0') AS INT), ds.status_id
+        ORDER BY CAST(COALESCE(d.category_id, '0') AS INT), ds.status_id
+        """,
+        params,
+    )
+    return [
+        {
+            "etapa": row.get("etapa") or "Sem etapa",
+            "pipeline": row.get("pipeline") or "Comercial",
+            "total": _int(row.get("total")),
+            "valorTotal": _number(row.get("valorTotal")),
+            "semantic": row.get("semantic") or "",
+            "pipelineId": _int(row.get("pipelineId")),
+            "stageId": row.get("stageId") or "",
+        }
+        for row in rows
+    ]
+
+
+def list_funil_vendas_por_pipeline(pipeline_ids: list[int] | tuple[int, ...] | None = None, user_id: int | None = None) -> list[dict]:
+    filtros, params = _funil_filters(pipeline_ids, user_id, alias="d")
+    pipeline_name = _funil_pipeline_name_sql("d")
+    rows = fetch_all(
+        f"""
+        SELECT
+            {pipeline_name} AS pipeline,
+            CAST(COALESCE(d.category_id, '0') AS INT) AS pipelineId,
+            SUM(CASE WHEN d.stage_semantic_id = 'P' THEN 1 ELSE 0 END) AS emAndamento,
+            SUM(CASE WHEN d.stage_semantic_id = 'S' THEN 1 ELSE 0 END) AS ganhos,
+            SUM(CASE WHEN d.stage_semantic_id = 'F' THEN 1 ELSE 0 END) AS perdidos,
+            COALESCE(SUM(CASE WHEN d.stage_semantic_id = 'P' THEN d.opportunity ELSE 0 END), 0) AS valorPipeline,
+            CASE
+                WHEN SUM(CASE WHEN d.stage_semantic_id IN ('S','F') THEN 1 ELSE 0 END) = 0 THEN 0
+                ELSE CAST(SUM(CASE WHEN d.stage_semantic_id = 'S' THEN 1 ELSE 0 END) AS FLOAT)
+                    / SUM(CASE WHEN d.stage_semantic_id IN ('S','F') THEN 1 ELSE 0 END) * 100
+            END AS taxaConversao
+        FROM dbo.crm_deals d
+        LEFT JOIN dbo.crm_pipelines p ON CAST(COALESCE(d.category_id, '0') AS INT) = p.id
+        WHERE 1 = 1 {filtros}
+        GROUP BY {pipeline_name}, CAST(COALESCE(d.category_id, '0') AS INT)
+        ORDER BY valorPipeline DESC
+        """,
+        params,
+    )
+    return [
+        {
+            "pipeline": row.get("pipeline") or "Comercial",
+            "pipelineId": _int(row.get("pipelineId")),
+            "emAndamento": _int(row.get("emAndamento")),
+            "ganhos": _int(row.get("ganhos")),
+            "perdidos": _int(row.get("perdidos")),
+            "valorPipeline": _number(row.get("valorPipeline")),
+            "taxaConversao": _number(row.get("taxaConversao")),
+        }
+        for row in rows
+    ]
+
+
+def list_funil_vendas_top_vendedores(pipeline_ids: list[int] | tuple[int, ...] | None = None, user_id: int | None = None) -> list[dict]:
+    filtros, params = _funil_filters(pipeline_ids, user_id, alias="d")
+    rows = fetch_all(
+        f"""
+        SELECT TOP 10
+            LTRIM(RTRIM(u.name + ' ' + COALESCE(u.last_name, ''))) AS nome,
+            SUM(CASE WHEN d.stage_semantic_id = 'P' THEN 1 ELSE 0 END) AS emAndamento,
+            SUM(CASE WHEN d.stage_semantic_id = 'S' THEN 1 ELSE 0 END) AS ganhos,
+            SUM(CASE WHEN d.stage_semantic_id = 'F' THEN 1 ELSE 0 END) AS perdidos,
+            COALESCE(SUM(CASE WHEN d.stage_semantic_id = 'P' THEN d.opportunity ELSE 0 END), 0) AS valorPipeline,
+            CASE
+                WHEN SUM(CASE WHEN d.stage_semantic_id IN ('S','F') THEN 1 ELSE 0 END) = 0 THEN 0
+                ELSE CAST(SUM(CASE WHEN d.stage_semantic_id = 'S' THEN 1 ELSE 0 END) AS FLOAT)
+                    / SUM(CASE WHEN d.stage_semantic_id IN ('S','F') THEN 1 ELSE 0 END) * 100
+            END AS taxaConversao
+        FROM dbo.crm_deals d
+        JOIN dbo.crm_users u ON d.assigned_by_id = u.id
+        WHERE 1 = 1 {filtros}
+        GROUP BY d.assigned_by_id, u.name, u.last_name
+        ORDER BY valorPipeline DESC
+        """,
+        params,
+    )
+    return [
+        {
+            "nome": row.get("nome") or "",
+            "emAndamento": _int(row.get("emAndamento")),
+            "ganhos": _int(row.get("ganhos")),
+            "perdidos": _int(row.get("perdidos")),
+            "valorPipeline": _number(row.get("valorPipeline")),
+            "taxaConversao": _number(row.get("taxaConversao")),
+        }
+        for row in rows
+    ]
+
+
+def list_funil_vendas_evolucao_mensal(pipeline_ids: list[int] | tuple[int, ...] | None = None, user_id: int | None = None) -> list[dict]:
+    filtros, params = _funil_filters(pipeline_ids, user_id)
+    rows = fetch_all(
+        f"""
+        SELECT
+            FORMAT(TRY_CAST(date_create AS DATE), 'yyyy-MM') AS mes,
+            SUM(CASE WHEN stage_semantic_id = 'P' THEN 1 ELSE 0 END) AS abertos,
+            SUM(CASE WHEN stage_semantic_id = 'S' THEN 1 ELSE 0 END) AS ganhos,
+            SUM(CASE WHEN stage_semantic_id = 'F' THEN 1 ELSE 0 END) AS perdidos
+        FROM dbo.crm_deals
+        WHERE date_create IS NOT NULL
+          AND TRY_CAST(date_create AS DATE) >= DATEADD(month, -12, GETDATE())
+          {filtros}
+        GROUP BY FORMAT(TRY_CAST(date_create AS DATE), 'yyyy-MM')
+        ORDER BY mes
+        """,
+        params,
+    )
+    return [
+        {
+            "mes": row.get("mes") or "",
+            "abertos": _int(row.get("abertos")),
+            "ganhos": _int(row.get("ganhos")),
+            "perdidos": _int(row.get("perdidos")),
+        }
+        for row in rows
+    ]
+
+
+# =============================================================================
+# Panorama CRM — dados originais migrados para REST
+# =============================================================================
+
+PANORAMA_CRM_ORIGENS_VALIDAS = {"leads", "base", "total"}
+PANORAMA_CRM_VISOES_VALIDAS = {"calendario", "coorte"}
+
+
+def _panorama_pipeline_clause(pipeline_id: int | None) -> str:
+    if pipeline_id == 31:
+        return "category_id = '31'"
+    if pipeline_id is None:
+        return f"CAST(COALESCE(category_id, '0') AS INT) NOT IN ({','.join(str(x) for x in PIPELINE_BLACKLIST)})"
+    return "(category_id = '0' OR category_id IS NULL)"
+
+
+def _panorama_origem_clause(origem: str | None) -> str:
+    origem_normalizada = origem if origem in PANORAMA_CRM_ORIGENS_VALIDAS else "total"
+    if origem_normalizada == "leads":
+        return "AND lead_id IS NOT NULL"
+    if origem_normalizada == "base":
+        return "AND lead_id IS NULL"
+    return ""
+
+
+def _panorama_user_clause(user_id: int | None, params: list) -> str:
+    if user_id is None:
+        return ""
+    params.append(int(user_id))
+    return "AND assigned_by_id = ?"
+
+
+def _panorama_validar_visao(visao: str | None) -> str:
+    return visao if visao in PANORAMA_CRM_VISOES_VALIDAS else "calendario"
+
+
+def list_panorama_crm_vendedores() -> list[dict]:
+    return list_crm_mapping_vendedores_original()
+
+
+def get_panorama_leads_snapshot() -> int:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT COUNT(*) AS em_andamento
+        FROM dbo.crm_leads
+        WHERE status_semantic_id = 'P'
+    """)
+    row = cursor.fetchone()
+    cursor.close()
+    conn.close()
+    return _int(row.em_andamento) if row else 0
+
+
+def get_panorama_deals_snapshot(pipeline_id: int | None = None, origem: str = "total", user_id: int | None = None) -> dict:
+    params: list = []
+    pipeline_clause = _panorama_pipeline_clause(pipeline_id)
+    origem_clause = _panorama_origem_clause(origem)
+    user_clause = _panorama_user_clause(user_id, params)
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        f"""
+        SELECT
+            COUNT(*) AS em_andamento,
+            COALESCE(SUM(opportunity), 0) AS valor_em_andamento
+        FROM dbo.crm_deals
+        WHERE stage_semantic_id = 'P'
+          AND {pipeline_clause}
+          {origem_clause}
+          {user_clause}
+        """,
+        *params,
+    )
+    row = cursor.fetchone()
+    cursor.close()
+    conn.close()
+
+    return {
+        "emAndamento": _int(row.em_andamento) if row else 0,
+        "valorEmAndamento": _number(row.valor_em_andamento) if row else 0,
+    }
+
+
+def get_panorama_leads(date_ini: str, date_fim: str, visao: str = "calendario") -> dict:
+    visao_normalizada = _panorama_validar_visao(visao)
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    if visao_normalizada == "calendario":
+        cursor.execute(
+            """
+            SELECT
+                FORMAT(TRY_CAST(date_create AS DATE), 'yyyy-MM') AS periodo,
+                COUNT(*) AS criados,
+                SUM(CASE WHEN TRY_CAST(moved_time AS DATE) BETWEEN ? AND ? THEN 1 ELSE 0 END) AS com_movimentacao
+            FROM dbo.crm_leads
+            WHERE TRY_CAST(date_create AS DATE) BETWEEN ? AND ?
+            GROUP BY FORMAT(TRY_CAST(date_create AS DATE), 'yyyy-MM')
+            ORDER BY periodo
+            """,
+            date_ini,
+            date_fim,
+            date_ini,
+            date_fim,
+        )
+        criados_rows = cursor.fetchall()
+        criados = [
+            {
+                "periodo": row.periodo,
+                "criados": _int(row.criados),
+                "comMovimentacao": _int(row.com_movimentacao),
+            }
+            for row in criados_rows
+        ]
+
+        cursor.execute(
+            """
+            SELECT
+                FORMAT(TRY_CAST(date_closed AS DATE), 'yyyy-MM') AS periodo,
+                SUM(CASE WHEN status_id = 'CONVERTED' THEN 1 ELSE 0 END) AS convertidos,
+                SUM(CASE WHEN status_semantic_id = 'F' THEN 1 ELSE 0 END) AS perdidos,
+                AVG(DATEDIFF(day, TRY_CAST(date_create AS DATE), TRY_CAST(date_closed AS DATE))) AS ciclo_medio
+            FROM dbo.crm_leads
+            WHERE TRY_CAST(date_closed AS DATE) BETWEEN ? AND ?
+              AND status_semantic_id IN ('S', 'F')
+            GROUP BY FORMAT(TRY_CAST(date_closed AS DATE), 'yyyy-MM')
+            ORDER BY periodo
+            """,
+            date_ini,
+            date_fim,
+        )
+        fechados_rows = cursor.fetchall()
+        fechados = [
+            {
+                "periodo": row.periodo,
+                "convertidos": _int(row.convertidos),
+                "perdidos": _int(row.perdidos),
+                "cicloMedio": _number(row.ciclo_medio) if row.ciclo_medio is not None else None,
+            }
+            for row in fechados_rows
+        ]
+
+        cursor.close()
+        conn.close()
+        return {"criados": criados, "fechados": fechados}
+
+    cursor.execute(
+        """
+        SELECT
+            FORMAT(TRY_CAST(date_create AS DATE), 'yyyy-MM') AS periodo,
+            COUNT(*) AS criados,
+            SUM(CASE WHEN TRY_CAST(moved_time AS DATE) BETWEEN ? AND ? THEN 1 ELSE 0 END) AS com_movimentacao,
+            SUM(CASE WHEN status_semantic_id = 'P' AND (date_closed IS NULL OR TRY_CAST(date_closed AS DATE) > ?) THEN 1 ELSE 0 END) AS em_andamento,
+            SUM(CASE WHEN status_id = 'CONVERTED' THEN 1 ELSE 0 END) AS convertidos,
+            SUM(CASE WHEN status_semantic_id = 'F' THEN 1 ELSE 0 END) AS perdidos,
+            CAST(SUM(CASE WHEN status_id = 'CONVERTED' THEN 1 ELSE 0 END) AS FLOAT)
+              / NULLIF(
+                  SUM(CASE WHEN status_semantic_id = 'P' AND (date_closed IS NULL OR TRY_CAST(date_closed AS DATE) > ?) THEN 1 ELSE 0 END)
+                + SUM(CASE WHEN status_id = 'CONVERTED' THEN 1 ELSE 0 END)
+                + SUM(CASE WHEN status_semantic_id = 'F' THEN 1 ELSE 0 END),
+                0
+              ) * 100 AS taxa_conv,
+            AVG(CASE WHEN date_closed IS NOT NULL THEN DATEDIFF(day, TRY_CAST(date_create AS DATE), TRY_CAST(date_closed AS DATE)) END) AS ciclo_medio
+        FROM dbo.crm_leads
+        WHERE TRY_CAST(date_create AS DATE) BETWEEN ? AND ?
+        GROUP BY FORMAT(TRY_CAST(date_create AS DATE), 'yyyy-MM')
+        ORDER BY periodo
+        """,
+        date_ini,
+        date_fim,
+        date_fim,
+        date_fim,
+        date_ini,
+        date_fim,
+    )
+    rows_raw = cursor.fetchall()
+    cursor.close()
+    conn.close()
+
+    return {
+        "rows": [
+            {
+                "periodo": row.periodo,
+                "criados": _int(row.criados),
+                "comMovimentacao": _int(row.com_movimentacao),
+                "emAndamento": _int(row.em_andamento),
+                "convertidos": _int(row.convertidos),
+                "perdidos": _int(row.perdidos),
+                "taxaConv": _number(row.taxa_conv) if row.taxa_conv is not None else None,
+                "cicloMedio": _number(row.ciclo_medio) if row.ciclo_medio is not None else None,
+            }
+            for row in rows_raw
+        ]
+    }
+
+
+def get_panorama_deals(
+    date_ini: str,
+    date_fim: str,
+    visao: str = "calendario",
+    pipeline_id: int | None = None,
+    origem: str = "total",
+    user_id: int | None = None,
+) -> dict:
+    visao_normalizada = _panorama_validar_visao(visao)
+    pipeline_clause = _panorama_pipeline_clause(pipeline_id)
+    origem_clause = _panorama_origem_clause(origem)
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    if visao_normalizada == "calendario":
+        params_criados: list = [date_ini, date_fim]
+        user_clause_criados = _panorama_user_clause(user_id, params_criados)
+        cursor.execute(
+            f"""
+            SELECT
+                FORMAT(TRY_CAST(date_create AS DATE), 'yyyy-MM') AS periodo,
+                COUNT(*) AS criados
+            FROM dbo.crm_deals
+            WHERE TRY_CAST(date_create AS DATE) BETWEEN ? AND ?
+              AND {pipeline_clause}
+              {origem_clause}
+              {user_clause_criados}
+            GROUP BY FORMAT(TRY_CAST(date_create AS DATE), 'yyyy-MM')
+            ORDER BY periodo
+            """,
+            *params_criados,
+        )
+        criados_rows = cursor.fetchall()
+        criados = [
+            {"periodo": row.periodo, "criados": _int(row.criados)}
+            for row in criados_rows
+        ]
+
+        params_fechados: list = [date_ini, date_fim]
+        user_clause_fechados = _panorama_user_clause(user_id, params_fechados)
+        cursor.execute(
+            f"""
+            SELECT
+                FORMAT(TRY_CAST(closedate AS DATE), 'yyyy-MM') AS periodo,
+                SUM(CASE WHEN stage_semantic_id = 'S' THEN 1 ELSE 0 END) AS ganhos,
+                COALESCE(SUM(CASE WHEN stage_semantic_id = 'S' THEN opportunity END), 0) AS valor_ganhos,
+                SUM(CASE WHEN stage_semantic_id = 'F' THEN 1 ELSE 0 END) AS perdidos,
+                AVG(DATEDIFF(day, TRY_CAST(date_create AS DATE), TRY_CAST(closedate AS DATE))) AS ciclo_total,
+                AVG(CASE WHEN stage_semantic_id = 'S' THEN DATEDIFF(day, TRY_CAST(date_create AS DATE), TRY_CAST(closedate AS DATE)) END) AS ciclo_ganhos
+            FROM dbo.crm_deals
+            WHERE TRY_CAST(closedate AS DATE) BETWEEN ? AND ?
+              AND stage_semantic_id IN ('S', 'F')
+              AND {pipeline_clause}
+              {origem_clause}
+              {user_clause_fechados}
+            GROUP BY FORMAT(TRY_CAST(closedate AS DATE), 'yyyy-MM')
+            ORDER BY periodo
+            """,
+            *params_fechados,
+        )
+        fechados_rows = cursor.fetchall()
+        fechados = [
+            {
+                "periodo": row.periodo,
+                "ganhos": _int(row.ganhos),
+                "valorGanhos": _number(row.valor_ganhos),
+                "perdidos": _int(row.perdidos),
+                "cicloTotal": _number(row.ciclo_total) if row.ciclo_total is not None else None,
+                "cicloGanhos": _number(row.ciclo_ganhos) if row.ciclo_ganhos is not None else None,
+            }
+            for row in fechados_rows
+        ]
+
+        cursor.close()
+        conn.close()
+        return {"criados": criados, "fechados": fechados}
+
+    params: list = [date_fim, date_fim, date_fim, date_ini, date_fim]
+    user_clause = _panorama_user_clause(user_id, params)
+    cursor.execute(
+        f"""
+        SELECT
+            FORMAT(TRY_CAST(date_create AS DATE), 'yyyy-MM') AS periodo,
+            COUNT(*) AS criados,
+            SUM(CASE WHEN stage_semantic_id = 'P' AND (closedate IS NULL OR TRY_CAST(closedate AS DATE) > ?) THEN 1 ELSE 0 END) AS em_andamento,
+            COALESCE(SUM(CASE WHEN stage_semantic_id = 'P' AND (closedate IS NULL OR TRY_CAST(closedate AS DATE) > ?) THEN opportunity END), 0) AS valor_em_andamento,
+            SUM(CASE WHEN stage_semantic_id = 'S' THEN 1 ELSE 0 END) AS ganhos,
+            COALESCE(SUM(CASE WHEN stage_semantic_id = 'S' THEN opportunity END), 0) AS valor_ganhos,
+            SUM(CASE WHEN stage_semantic_id = 'F' THEN 1 ELSE 0 END) AS perdidos,
+            CAST(SUM(CASE WHEN stage_semantic_id = 'S' THEN 1 ELSE 0 END) AS FLOAT)
+              / NULLIF(
+                  SUM(CASE WHEN stage_semantic_id = 'P' AND (closedate IS NULL OR TRY_CAST(closedate AS DATE) > ?) THEN 1 ELSE 0 END)
+                + SUM(CASE WHEN stage_semantic_id = 'S' THEN 1 ELSE 0 END)
+                + SUM(CASE WHEN stage_semantic_id = 'F' THEN 1 ELSE 0 END),
+                0
+              ) * 100 AS taxa_conv,
+            AVG(CASE WHEN stage_semantic_id IN ('S', 'F') AND closedate IS NOT NULL THEN DATEDIFF(day, TRY_CAST(date_create AS DATE), TRY_CAST(closedate AS DATE)) END) AS ciclo_total,
+            AVG(CASE WHEN stage_semantic_id = 'S' AND closedate IS NOT NULL THEN DATEDIFF(day, TRY_CAST(date_create AS DATE), TRY_CAST(closedate AS DATE)) END) AS ciclo_ganhos
+        FROM dbo.crm_deals
+        WHERE TRY_CAST(date_create AS DATE) BETWEEN ? AND ?
+          AND {pipeline_clause}
+          {origem_clause}
+          {user_clause}
+        GROUP BY FORMAT(TRY_CAST(date_create AS DATE), 'yyyy-MM')
+        ORDER BY periodo
+        """,
+        *params,
+    )
+    rows_raw = cursor.fetchall()
+    cursor.close()
+    conn.close()
+
+    return {
+        "rows": [
+            {
+                "periodo": row.periodo,
+                "criados": _int(row.criados),
+                "emAndamento": _int(row.em_andamento),
+                "valorEmAndamento": _number(row.valor_em_andamento),
+                "ganhos": _int(row.ganhos),
+                "valorGanhos": _number(row.valor_ganhos),
+                "perdidos": _int(row.perdidos),
+                "taxaConv": _number(row.taxa_conv) if row.taxa_conv is not None else None,
+                "cicloTotal": _number(row.ciclo_total) if row.ciclo_total is not None else None,
+                "cicloGanhos": _number(row.ciclo_ganhos) if row.ciclo_ganhos is not None else None,
+            }
+            for row in rows_raw
+        ]
+    }

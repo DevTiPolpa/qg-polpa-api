@@ -1579,3 +1579,203 @@ def api_recorrentes_produtos(
 ):
     filtros = _build_recorrentes_filtros(dataInicio, dataFim, mercados, vendedores, None, data_inicio, data_fim, None)
     return list_recorrentes_produtos(cod_parc, filtros)
+
+# =============================================================================
+# Funil de Vendas — endpoints REST
+# =============================================================================
+
+from app.database import (
+    list_funil_vendas_vendedores,
+    get_funil_vendas_kpis,
+    list_funil_vendas_por_etapa,
+    list_funil_vendas_por_pipeline,
+    list_funil_vendas_top_vendedores,
+    list_funil_vendas_evolucao_mensal,
+)
+
+
+def _csv_or_list_funil(value):
+    if value is None:
+        return []
+    values = value if isinstance(value, (list, tuple)) else [value]
+    out = []
+    for item in values:
+        if item is None or item == "":
+            continue
+        if isinstance(item, str) and "," in item:
+            out.extend(part.strip() for part in item.split(",") if part.strip())
+        else:
+            out.append(item)
+    return out
+
+
+def _pipeline_ids_funil(value):
+    ids = []
+    for item in _csv_or_list_funil(value):
+        try:
+            ids.append(int(item))
+        except (TypeError, ValueError):
+            continue
+    return ids
+
+
+@app.get("/api/funil-vendas/vendedores")
+def api_funil_vendas_vendedores():
+    return list_funil_vendas_vendedores()
+
+
+@app.get("/api/funil-vendas/kpis")
+def api_funil_vendas_kpis(
+    pipelineIds: list[str] | None = Query(default=None),
+    pipeline_ids: list[str] | None = Query(default=None),
+    userId: int | None = None,
+    user_id: int | None = None,
+):
+    pipelines = _pipeline_ids_funil(pipelineIds or pipeline_ids)
+    return get_funil_vendas_kpis(pipelines, userId or user_id)
+
+
+@app.get("/api/funil-vendas/por-etapa")
+def api_funil_vendas_por_etapa(
+    pipelineIds: list[str] | None = Query(default=None),
+    pipeline_ids: list[str] | None = Query(default=None),
+    userId: int | None = None,
+    user_id: int | None = None,
+):
+    pipelines = _pipeline_ids_funil(pipelineIds or pipeline_ids)
+    return list_funil_vendas_por_etapa(pipelines, userId or user_id)
+
+
+@app.get("/api/funil-vendas/por-pipeline")
+def api_funil_vendas_por_pipeline(
+    pipelineIds: list[str] | None = Query(default=None),
+    pipeline_ids: list[str] | None = Query(default=None),
+    userId: int | None = None,
+    user_id: int | None = None,
+):
+    pipelines = _pipeline_ids_funil(pipelineIds or pipeline_ids)
+    return list_funil_vendas_por_pipeline(pipelines, userId or user_id)
+
+
+@app.get("/api/funil-vendas/top-vendedores")
+def api_funil_vendas_top_vendedores(
+    pipelineIds: list[str] | None = Query(default=None),
+    pipeline_ids: list[str] | None = Query(default=None),
+    userId: int | None = None,
+    user_id: int | None = None,
+):
+    pipelines = _pipeline_ids_funil(pipelineIds or pipeline_ids)
+    return list_funil_vendas_top_vendedores(pipelines, userId or user_id)
+
+
+@app.get("/api/funil-vendas/evolucao-mensal")
+def api_funil_vendas_evolucao_mensal(
+    pipelineIds: list[str] | None = Query(default=None),
+    pipeline_ids: list[str] | None = Query(default=None),
+    userId: int | None = None,
+    user_id: int | None = None,
+):
+    pipelines = _pipeline_ids_funil(pipelineIds or pipeline_ids)
+    return list_funil_vendas_evolucao_mensal(pipelines, userId or user_id)
+
+
+# =============================================================================
+# Panorama CRM — endpoints REST
+# =============================================================================
+
+from app.database import (
+    list_panorama_crm_vendedores,
+    get_panorama_leads_snapshot,
+    get_panorama_deals_snapshot,
+    get_panorama_leads,
+    get_panorama_deals,
+)
+
+
+def _panorama_parse_pipeline_id(value: str | int | None) -> int | None:
+    if value is None or value == "" or value == "null" or value == "todos":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _panorama_parse_user_id(value: str | int | None) -> int | None:
+    if value is None or value == "" or value == "null" or value == "todos":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _panorama_normalize_origem(value: str | None) -> str:
+    return value if value in {"leads", "base", "total"} else "total"
+
+
+def _panorama_normalize_visao(value: str | None) -> str:
+    return value if value in {"calendario", "coorte"} else "calendario"
+
+
+@app.get("/api/panorama-crm/vendedores")
+def api_panorama_crm_vendedores():
+    return list_panorama_crm_vendedores()
+
+
+@app.get("/api/panorama-crm/leads-snapshot")
+def api_panorama_crm_leads_snapshot():
+    return get_panorama_leads_snapshot()
+
+
+@app.get("/api/panorama-crm/deals-snapshot")
+def api_panorama_crm_deals_snapshot(
+    pipelineId: str | None = None,
+    pipeline_id: str | None = None,
+    origem: str | None = None,
+    userId: str | None = None,
+    user_id: str | None = None,
+):
+    return get_panorama_deals_snapshot(
+        _panorama_parse_pipeline_id(pipelineId if pipelineId is not None else pipeline_id),
+        _panorama_normalize_origem(origem),
+        _panorama_parse_user_id(userId if userId is not None else user_id),
+    )
+
+
+@app.get("/api/panorama-crm/leads")
+def api_panorama_crm_leads(
+    dateIni: str = Query(default="2026-01-01"),
+    dateFim: str = Query(default="2026-12-31"),
+    date_ini: str | None = None,
+    date_fim: str | None = None,
+    visao: str | None = Query(default="calendario"),
+):
+    return get_panorama_leads(
+        date_ini or dateIni,
+        date_fim or dateFim,
+        _panorama_normalize_visao(visao),
+    )
+
+
+@app.get("/api/panorama-crm/deals")
+def api_panorama_crm_deals(
+    dateIni: str = Query(default="2026-01-01"),
+    dateFim: str = Query(default="2026-12-31"),
+    date_ini: str | None = None,
+    date_fim: str | None = None,
+    visao: str | None = Query(default="calendario"),
+    pipelineId: str | None = None,
+    pipeline_id: str | None = None,
+    origem: str | None = None,
+    userId: str | None = None,
+    user_id: str | None = None,
+):
+    return get_panorama_deals(
+        date_ini or dateIni,
+        date_fim or dateFim,
+        _panorama_normalize_visao(visao),
+        _panorama_parse_pipeline_id(pipelineId if pipelineId is not None else pipeline_id),
+        _panorama_normalize_origem(origem),
+        _panorama_parse_user_id(userId if userId is not None else user_id),
+    )
