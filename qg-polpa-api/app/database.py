@@ -22,7 +22,14 @@ def get_connection_string() -> str:
     driver = os.getenv("DB_DRIVER", "ODBC Driver 17 for SQL Server")
     server = os.getenv("DB_SERVER")
     port = os.getenv("DB_PORT", "1433")
-    database = os.getenv("DB_NAME")
+
+    # Compatibilidade com o projeto antigo Node/tRPC anexado:
+    # nele a variável do banco é DB_DATABASE=PolpaBrasil, enquanto
+    # versões anteriores da API Python esperavam DB_NAME. Se a API
+    # usar apenas DB_NAME, ela pode conectar no banco errado ou falhar
+    # mesmo com o projeto antigo funcionando localmente.
+    database = os.getenv("DB_NAME") or os.getenv("DB_DATABASE")
+
     user = os.getenv("DB_USER")
     password = os.getenv("DB_PASSWORD")
 
@@ -31,7 +38,7 @@ def get_connection_string() -> str:
     if not server:
         missing_vars.append("DB_SERVER")
     if not database:
-        missing_vars.append("DB_NAME")
+        missing_vars.append("DB_NAME ou DB_DATABASE")
     if not user:
         missing_vars.append("DB_USER")
     if not password:
@@ -42,9 +49,16 @@ def get_connection_string() -> str:
             "Variáveis ausentes no .env: " + ", ".join(missing_vars)
         )
 
+    server_part = str(server).strip()
+    port_part = str(port).strip() if port else ""
+    # Para instância nomeada, ex.: localhost\SQLEXPRESS, não acrescenta ,1433
+    # porque SQL Server Browser/instância nomeada pode resolver a porta sozinho.
+    if port_part and "\\" not in server_part and "," not in server_part:
+        server_part = f"{server_part},{port_part}"
+
     return (
         f"DRIVER={{{driver}}};"
-        f"SERVER={server},{port};"
+        f"SERVER={server_part};"
         f"DATABASE={database};"
         f"UID={user};"
         f"PWD={password};"
@@ -3473,7 +3487,7 @@ def get_panorama_deals(
     }
 
 # =============================================================================
-# Agente IA / Chatbot — persistência SQL Server
+# Agente IA / Chatbot — persistência e ferramenta SQL Server de produção
 # =============================================================================
 
 def _chat_datetime_to_iso(value):
@@ -3484,12 +3498,20 @@ def _chat_datetime_to_iso(value):
     return str(value)
 
 
-def ensure_chat_messages_table() -> None:
-    """Garante a existência da tabela usada pelo Agente IA.
+def _chat_value_to_json(value):
+    if value is None:
+        return None
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return value
 
-    A estrutura preserva o modelo já existente no servidor Node legado:
-    session_id, user_id, role, content e created_at.
-    """
+
+def ensure_chat_messages_table() -> None:
+    """Garante a existência da tabela usada pelo Agente IA."""
     with get_connection() as connection:
         cursor = connection.cursor()
         cursor.execute(
@@ -3618,6 +3640,634 @@ def get_chat_sessions(user_id: int) -> list[dict]:
         """,
         (user_id,),
     )
-
-    
     return [_serialize_chat_session(row) for row in rows]
+
+
+
+def _agent_find_table_schema(table_name: str) -> str | None:
+    """Localiza tabela ou view por nome, sem depender do schema dbo nem de maiúsculas/minúsculas."""
+    rows = fetch_all(
+        """
+        SELECT TOP (1) TABLE_SCHEMA AS table_schema
+        FROM INFORMATION_SCHEMA.TABLES
+        WHERE LOWER(TABLE_NAME) = LOWER(?)
+        ORDER BY
+            CASE WHEN TABLE_SCHEMA = 'dbo' THEN 0 ELSE 1 END,
+            CASE WHEN TABLE_TYPE = 'BASE TABLE' THEN 0 ELSE 1 END,
+            TABLE_SCHEMA
+        """,
+        (table_name,),
+    )
+    if not rows:
+        return None
+    schema = rows[0].get("table_schema")
+    return str(schema) if schema else None
+
+
+def _agent_table_columns(table_schema: str, table_name: str) -> set[str]:
+    rows = fetch_all(
+        """
+        SELECT COLUMN_NAME AS column_name
+        FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = ?
+          AND LOWER(TABLE_NAME) = LOWER(?)
+        """,
+        (table_schema, table_name),
+    )
+    return {str(row.get("column_name")) for row in rows if row.get("column_name")}
+
+
+def _agent_table_inventory(limit: int = 120) -> list[dict]:
+    return fetch_all(
+        f"""
+        SELECT TOP ({max(1, min(int(limit or 120), 500))})
+            t.TABLE_SCHEMA AS table_schema,
+            t.TABLE_NAME AS table_name,
+            t.TABLE_TYPE AS table_type,
+            COUNT(c.COLUMN_NAME) AS column_count
+        FROM INFORMATION_SCHEMA.TABLES t
+        LEFT JOIN INFORMATION_SCHEMA.COLUMNS c
+          ON c.TABLE_SCHEMA = t.TABLE_SCHEMA
+         AND c.TABLE_NAME = t.TABLE_NAME
+        GROUP BY t.TABLE_SCHEMA, t.TABLE_NAME, t.TABLE_TYPE
+        ORDER BY
+            CASE
+                WHEN LOWER(t.TABLE_NAME) LIKE '%fato%venda%' THEN 0
+                WHEN LOWER(t.TABLE_NAME) LIKE '%venda%' THEN 1
+                WHEN LOWER(t.TABLE_NAME) LIKE '%b2b%' THEN 2
+                WHEN LOWER(t.TABLE_NAME) LIKE '%orc%' THEN 3
+                WHEN LOWER(t.TABLE_NAME) LIKE '%pedido%' THEN 4
+                WHEN LOWER(t.TABLE_NAME) LIKE '%nota%' THEN 5
+                ELSE 9
+            END,
+            t.TABLE_SCHEMA,
+            t.TABLE_NAME
+        """
+    )
+
+
+def _agent_quote_identifier(identifier: str) -> str:
+    return "[" + str(identifier).replace("]", "]]" ) + "]"
+
+
+def _agent_normalize_tipo_receita(tipo_receita) -> str:
+    raw = str(tipo_receita or "").strip()
+    upper = raw.upper()
+    if "VENDA" in upper and "FIRME" in upper:
+        return "Vendas Firmes"
+    if upper in {"VENDA", "VENDAS", "VENDA_FIRME", "VENDAS_FIRMES"} or "FIRME" in upper:
+        return "Vendas Firmes"
+    if "FORECAST" in upper or "PREV" in upper or "ORC" in upper:
+        return "Forecast"
+    if "NOVO" in upper or "PROJETO" in upper:
+        return "Projetos"
+    # Regra do projeto original local: DEVOLUCAO não aparece como linha separada.
+    # Ela compõe Vendas Firmes para reproduzir o total exibido na base de teste.
+    if "DEVOL" in upper:
+        return "Vendas Firmes"
+    return raw or "Sem categoria"
+
+
+def _agent_fetch_rows(query: str, params: tuple | list = ()) -> list[dict]:
+    """Executa SELECT interno e devolve lista de dict para rotinas determinísticas."""
+    with get_connection() as connection:
+        cursor = connection.cursor()
+        cursor.execute(query, tuple(params or ()))
+        if cursor.description is None:
+            return []
+        columns = [column[0] for column in cursor.description]
+        fetched = cursor.fetchall()
+    return [
+        {columns[i]: _chat_value_to_json(value) for i, value in enumerate(row)}
+        for row in fetched
+    ]
+
+
+def _agent_aggregate_revenue_rows(raw_rows: list[dict]) -> tuple[list[dict], float]:
+    aggregated: dict[str, dict] = {}
+    for row in raw_rows:
+        categoria_raw = row.get("categoria") or row.get("tipo_receita")
+        origem = row.get("origem") or row.get("tipo_receita") or categoria_raw
+        categoria = _agent_normalize_tipo_receita(categoria_raw)
+        total_value = float(row.get("total") or 0)
+        origem_text = f"{categoria_raw or ''} {origem or ''}".upper()
+        if "DEVOL" in origem_text:
+            total_value = abs(total_value)
+        current = aggregated.setdefault(
+            categoria,
+            {"categoria": categoria, "tipo_receita_origem": [], "total": 0.0, "percentual": 0.0},
+        )
+        if origem is not None and str(origem) not in current["tipo_receita_origem"]:
+            current["tipo_receita_origem"].append(str(origem))
+        current["total"] += total_value
+
+    preferred_order = {"Vendas Firmes": 0, "Forecast": 1, "Projetos": 2}
+    rows = sorted(
+        aggregated.values(),
+        key=lambda item: (preferred_order.get(item["categoria"], 99), -float(item["total"] or 0)),
+    )
+    total_geral = sum(float(item["total"] or 0) for item in rows)
+    for item in rows:
+        item["percentual"] = (float(item["total"] or 0) / total_geral * 100.0) if total_geral else 0.0
+        item["total"] = round(float(item["total"] or 0), 2)
+        item["percentual"] = round(float(item["percentual"] or 0), 2)
+    return rows, round(total_geral, 2)
+
+
+def _agent_get_exact_table_name(schema: str, desired_name: str) -> str:
+    rows = fetch_all(
+        """
+        SELECT TOP (1) TABLE_NAME AS table_name
+        FROM INFORMATION_SCHEMA.TABLES
+        WHERE TABLE_SCHEMA = ? AND LOWER(TABLE_NAME) = LOWER(?)
+        ORDER BY CASE WHEN TABLE_TYPE = 'BASE TABLE' THEN 0 ELSE 1 END, TABLE_NAME
+        """,
+        (schema, desired_name),
+    )
+    return str(rows[0].get("table_name")) if rows else desired_name
+
+
+def _agent_query_faturamento_fato_vendas(ano_int: int) -> dict | None:
+    schema = _agent_find_table_schema("fato_vendas")
+    if not schema:
+        return None
+
+    table_name = _agent_get_exact_table_name(schema, "fato_vendas")
+    columns = _agent_table_columns(schema, table_name)
+    required = {"dt_entrega_cliente", "tipo_receita", "valor_pendente"}
+    missing = sorted(required - columns)
+    if missing:
+        return {
+            "success": False,
+            "source_found": f"{schema}.{table_name}",
+            "error": "Colunas obrigatórias ausentes em fato_vendas: " + ", ".join(missing),
+            "available_columns": sorted(columns),
+            "rows": [],
+            "total": 0.0,
+        }
+
+    filters = ["dt_entrega_cliente >= ?", "dt_entrega_cliente < ?"]
+    params: list = [f"{ano_int}-01-01", f"{ano_int + 1}-01-01"]
+    # No resultado original da base local, o chat não removia cod_top=1023 nem TOP contendo
+    # ESTOQUE MINIM; por isso estes filtros não são aplicados neste cálculo determinístico.
+
+    table_ref = f"{_agent_quote_identifier(schema)}.{_agent_quote_identifier(table_name)}"
+    query = f"""
+        SELECT
+            tipo_receita AS categoria,
+            tipo_receita AS origem,
+            SUM(COALESCE(valor_pendente, 0)) AS total
+        FROM {table_ref}
+        WHERE {' AND '.join(filters)}
+        GROUP BY tipo_receita
+        ORDER BY total DESC
+    """
+    raw_rows = _agent_fetch_rows(query, params)
+    rows, total_geral = _agent_aggregate_revenue_rows(raw_rows)
+    return {
+        "success": True,
+        "ano": ano_int,
+        "source": "fato_vendas",
+        "rows": rows,
+        "total": total_geral,
+        "query_context": {
+            "table": f"{schema}.{table_name}",
+            "date_filter": f"dt_entrega_cliente >= {ano_int}-01-01 AND < {ano_int + 1}-01-01",
+            "observacao": "Fonte analítica principal encontrada no banco como tabela ou view.",
+        },
+    }
+
+
+def _agent_query_faturamento_base_local(ano_int: int) -> dict | None:
+    raw_rows: list[dict] = []
+    fontes: list[str] = []
+    erros: list[str] = []
+
+    b2b_schema = _agent_find_table_schema("B2B")
+    if b2b_schema:
+        b2b_table = _agent_get_exact_table_name(b2b_schema, "B2B")
+        b2b_columns = _agent_table_columns(b2b_schema, b2b_table)
+        valor_col = next((col for col in ("ValorPendente", "valor_pendente", "VLRNOTA", "VLRDESDOB", "VALOR", "valor") if col in b2b_columns), None)
+        date_col = next((col for col in ("DTMOV", "DTNEG", "dt_mov", "dtneg", "data", "DATA") if col in b2b_columns), None)
+        if valor_col and date_col:
+            projeto_expr = _agent_quote_identifier("PROJETO") if "PROJETO" in b2b_columns else (_agent_quote_identifier("projeto") if "projeto" in b2b_columns else "NULL")
+            table_ref = f"{_agent_quote_identifier(b2b_schema)}.{_agent_quote_identifier(b2b_table)}"
+            query = f"""
+                SELECT
+                    CASE
+                        WHEN UPPER(COALESCE(CAST({projeto_expr} AS varchar(255)), '')) LIKE '%NOVO%' OR UPPER(COALESCE(CAST({projeto_expr} AS varchar(255)), '')) LIKE '%PROJETO%' THEN 'Projetos'
+                        ELSE 'Vendas Firmes'
+                    END AS categoria,
+                    ? AS origem,
+                    SUM(COALESCE(TRY_CONVERT(float, {_agent_quote_identifier(valor_col)}), 0)) AS total
+                FROM {table_ref}
+                WHERE TRY_CONVERT(date, {_agent_quote_identifier(date_col)}) >= ?
+                  AND TRY_CONVERT(date, {_agent_quote_identifier(date_col)}) < ?
+                GROUP BY CASE
+                        WHEN UPPER(COALESCE(CAST({projeto_expr} AS varchar(255)), '')) LIKE '%NOVO%' OR UPPER(COALESCE(CAST({projeto_expr} AS varchar(255)), '')) LIKE '%PROJETO%' THEN 'Projetos'
+                        ELSE 'Vendas Firmes'
+                    END
+            """
+            try:
+                rows = _agent_fetch_rows(query, [b2b_table, f"{ano_int}-01-01", f"{ano_int + 1}-01-01"])
+                raw_rows.extend(rows)
+                fontes.append(f"{b2b_schema}.{b2b_table}")
+            except Exception as exc:
+                erros.append(f"{b2b_table}: {exc}")
+
+    for table_name in ("orcamento_2026", "orcamento", "orcamentos"):
+        schema = _agent_find_table_schema(table_name)
+        if not schema:
+            continue
+        exact_table = _agent_get_exact_table_name(schema, table_name)
+        columns = _agent_table_columns(schema, exact_table)
+        value_col = next((col for col in ("valor_pendente", "ValorPendente", "valor", "VALOR", "vlr_total", "VLR_TOTAL") if col in columns), None)
+        date_col = next((col for col in ("dt_prev_entrega_embarque", "dt_entrega_cliente", "DTMOV", "DTNEG", "data", "DATA") if col in columns), None)
+        if not value_col or not date_col:
+            erros.append(f"{exact_table}: não encontrei coluna de valor/data compatível")
+            continue
+        projeto_expr = _agent_quote_identifier("projeto") if "projeto" in columns else (_agent_quote_identifier("PROJETO") if "PROJETO" in columns else "NULL")
+        table_ref = f"{_agent_quote_identifier(schema)}.{_agent_quote_identifier(exact_table)}"
+        query = f"""
+            SELECT
+                CASE
+                    WHEN UPPER(COALESCE(CAST({projeto_expr} AS varchar(255)), '')) LIKE '%NOVO%' OR UPPER(COALESCE(CAST({projeto_expr} AS varchar(255)), '')) LIKE '%PROJETO%' THEN 'Projetos'
+                    ELSE 'Forecast'
+                END AS categoria,
+                ? AS origem,
+                SUM(COALESCE(TRY_CONVERT(float, {_agent_quote_identifier(value_col)}), 0)) AS total
+            FROM {table_ref}
+            WHERE TRY_CONVERT(date, {_agent_quote_identifier(date_col)}) >= ?
+              AND TRY_CONVERT(date, {_agent_quote_identifier(date_col)}) < ?
+            GROUP BY CASE
+                    WHEN UPPER(COALESCE(CAST({projeto_expr} AS varchar(255)), '')) LIKE '%NOVO%' OR UPPER(COALESCE(CAST({projeto_expr} AS varchar(255)), '')) LIKE '%PROJETO%' THEN 'Projetos'
+                    ELSE 'Forecast'
+                END
+        """
+        try:
+            rows = _agent_fetch_rows(query, [exact_table, f"{ano_int}-01-01", f"{ano_int + 1}-01-01"])
+            raw_rows.extend(rows)
+            fontes.append(f"{schema}.{exact_table}")
+        except Exception as exc:
+            erros.append(f"{exact_table}: {exc}")
+
+    if not fontes:
+        return None
+
+    rows, total_geral = _agent_aggregate_revenue_rows(raw_rows)
+    return {
+        "success": True,
+        "ano": ano_int,
+        "source": "base_local_fallback",
+        "rows": rows,
+        "total": total_geral,
+        "query_context": {
+            "table": ", ".join(fontes),
+            "date_filter": f"ano {ano_int}",
+            "observacao": "fato_vendas não foi encontrada; usei fallback da base local com tabelas/views operacionais.",
+            "warnings": erros,
+        },
+    }
+
+
+def _agent_score_value_column(column: str) -> int:
+    c = column.lower()
+    if any(bad in c for bad in ("qtd", "quant", "kg", "peso", "volume", "percent", "perc")):
+        return -100
+    score = 0
+    if c in ("valor_pendente", "valorpending", "valorpendente"):
+        score += 100
+    if "valor" in c or c.startswith("vlr") or "vlr" in c:
+        score += 50
+    if "receita" in c or "fatur" in c or "total" in c:
+        score += 40
+    if "opportunity" in c or "oportun" in c:
+        score += 20
+    return score
+
+
+def _agent_score_date_column(column: str) -> int:
+    c = column.lower()
+    score = 0
+    if c in ("dt_entrega_cliente", "dtmov", "dtneg", "dt_prev_entrega_embarque"):
+        score += 100
+    if c.startswith("dt") or "data" in c or "date" in c:
+        score += 50
+    if c in ("ano", "year") or c.endswith("_ano"):
+        score += 20
+    return score
+
+
+def _agent_discover_candidate_sources() -> list[dict]:
+    rows = fetch_all(
+        """
+        SELECT
+            t.TABLE_SCHEMA AS table_schema,
+            t.TABLE_NAME AS table_name,
+            t.TABLE_TYPE AS table_type,
+            c.COLUMN_NAME AS column_name,
+            c.DATA_TYPE AS data_type
+        FROM INFORMATION_SCHEMA.TABLES t
+        JOIN INFORMATION_SCHEMA.COLUMNS c
+          ON c.TABLE_SCHEMA = t.TABLE_SCHEMA
+         AND c.TABLE_NAME = t.TABLE_NAME
+        WHERE t.TABLE_SCHEMA NOT IN ('sys', 'INFORMATION_SCHEMA')
+        ORDER BY t.TABLE_SCHEMA, t.TABLE_NAME, c.ORDINAL_POSITION
+        """
+    )
+    grouped: dict[tuple[str, str, str], list[dict]] = {}
+    for row in rows:
+        key = (str(row.get("table_schema")), str(row.get("table_name")), str(row.get("table_type") or ""))
+        grouped.setdefault(key, []).append(row)
+
+    candidates: list[dict] = []
+    for (schema, table, table_type), cols in grouped.items():
+        col_names = [str(col.get("column_name")) for col in cols]
+        value_cols = sorted([(col, _agent_score_value_column(col)) for col in col_names], key=lambda item: item[1], reverse=True)
+        date_cols = sorted([(col, _agent_score_date_column(col)) for col in col_names], key=lambda item: item[1], reverse=True)
+        value_cols = [item for item in value_cols if item[1] > 0]
+        date_cols = [item for item in date_cols if item[1] > 0]
+        if not value_cols or not date_cols:
+            continue
+        table_l = table.lower()
+        table_score = 0
+        if "fato" in table_l and "venda" in table_l:
+            table_score += 100
+        if "venda" in table_l or "receita" in table_l or "fatur" in table_l:
+            table_score += 60
+        if "b2b" in table_l:
+            table_score += 50
+        if "orc" in table_l or "forecast" in table_l:
+            table_score += 40
+        if "pedido" in table_l or "nota" in table_l or "mov" in table_l:
+            table_score += 25
+        if table_l.startswith("crm_"):
+            table_score -= 50
+        total_score = table_score + value_cols[0][1] + date_cols[0][1]
+        category_col = next((col for col in col_names if col.lower() in ("tipo_receita", "tipo", "categoria", "projeto", "mercado_vendas", "status")), None)
+        candidates.append({
+            "schema": schema,
+            "table": table,
+            "table_type": table_type,
+            "value_col": value_cols[0][0],
+            "date_col": date_cols[0][0],
+            "category_col": category_col,
+            "score": total_score,
+            "columns_sample": col_names[:20],
+        })
+    return sorted(candidates, key=lambda item: item["score"], reverse=True)
+
+
+def _agent_query_faturamento_discovery(ano_int: int) -> dict | None:
+    candidates = _agent_discover_candidate_sources()
+    erros: list[str] = []
+    tried: list[str] = []
+    for candidate in candidates[:12]:
+        schema = candidate["schema"]
+        table = candidate["table"]
+        value_col = candidate["value_col"]
+        date_col = candidate["date_col"]
+        category_col = candidate.get("category_col")
+        table_ref = f"{_agent_quote_identifier(schema)}.{_agent_quote_identifier(table)}"
+        value_expr = f"TRY_CONVERT(float, {_agent_quote_identifier(value_col)})"
+        date_expr = f"TRY_CONVERT(date, {_agent_quote_identifier(date_col)})"
+        if str(date_col).lower() in ("ano", "year") or str(date_col).lower().endswith("_ano"):
+            where_expr = f"TRY_CONVERT(int, {_agent_quote_identifier(date_col)}) = ?"
+            params = [ano_int]
+        else:
+            where_expr = f"{date_expr} >= ? AND {date_expr} < ?"
+            params = [f"{ano_int}-01-01", f"{ano_int + 1}-01-01"]
+
+        if category_col:
+            cat_expr = f"CAST({_agent_quote_identifier(category_col)} AS varchar(255))"
+            category_sql = f"""CASE
+                    WHEN UPPER(COALESCE({cat_expr}, '')) LIKE '%DEVOL%' THEN 'Vendas Firmes'
+                    WHEN UPPER(COALESCE({cat_expr}, '')) LIKE '%FORECAST%' OR UPPER(COALESCE({cat_expr}, '')) LIKE '%ORC%' OR UPPER(COALESCE({cat_expr}, '')) LIKE '%PREV%' THEN 'Forecast'
+                    WHEN UPPER(COALESCE({cat_expr}, '')) LIKE '%NOVO%' OR UPPER(COALESCE({cat_expr}, '')) LIKE '%PROJETO%' THEN 'Projetos'
+                    ELSE 'Vendas Firmes'
+                END"""
+        else:
+            table_l = str(table).lower()
+            default_cat = "Forecast" if ("orc" in table_l or "forecast" in table_l) else "Vendas Firmes"
+            category_sql = f"'{default_cat}'"
+
+        query = f"""
+            SELECT
+                {category_sql} AS categoria,
+                ? AS origem,
+                SUM(COALESCE({value_expr}, 0)) AS total
+            FROM {table_ref}
+            WHERE {where_expr}
+            GROUP BY {category_sql}
+            HAVING SUM(COALESCE({value_expr}, 0)) <> 0
+            ORDER BY total DESC
+        """
+        try:
+            rows = _agent_fetch_rows(query, [f"{schema}.{table}", *params])
+            tried.append(f"{schema}.{table}({value_col}/{date_col})")
+            if rows:
+                normalized_rows, total_geral = _agent_aggregate_revenue_rows(rows)
+                return {
+                    "success": True,
+                    "ano": ano_int,
+                    "source": "descoberta_automatica",
+                    "rows": normalized_rows,
+                    "total": total_geral,
+                    "query_context": {
+                        "table": f"{schema}.{table}",
+                        "date_filter": f"ano {ano_int}",
+                        "observacao": "Usei descoberta automática porque os nomes esperados de tabela não foram encontrados.",
+                        "value_col": value_col,
+                        "date_col": date_col,
+                        "category_col": category_col,
+                        "tried_sources": tried,
+                    },
+                }
+        except Exception as exc:
+            tried.append(f"{schema}.{table}({value_col}/{date_col})")
+            erros.append(f"{schema}.{table}: {exc}")
+    if candidates:
+        return {
+            "success": False,
+            "error": "Encontrei possíveis tabelas de faturamento, mas nenhuma retornou valor para o ano informado",
+            "candidate_sources": candidates[:15],
+            "tried_sources": tried,
+            "warnings": erros[:10],
+            "rows": [],
+            "total": 0.0,
+        }
+    return None
+
+
+def get_faturamento_anual_por_categoria(ano: int) -> dict:
+    """Consulta determinística para faturamento anual por categoria.
+
+    Ordem de fontes:
+    1. fato_vendas, tabela ou view.
+    2. B2B + orcamento_2026/orcamento/orcamentos, tabela ou view.
+    3. Descoberta automática por colunas prováveis de valor e data.
+    """
+    try:
+        ano_int = int(ano)
+    except Exception:
+        return {"success": False, "error": "Ano inválido", "rows": [], "total": 0.0}
+
+    if ano_int < 2000 or ano_int > 2100:
+        return {"success": False, "error": "Ano fora do intervalo permitido", "rows": [], "total": 0.0}
+
+    try:
+        fato_result = _agent_query_faturamento_fato_vendas(ano_int)
+        if fato_result and (not fato_result.get("success") or fato_result.get("rows")):
+            return fato_result
+
+        fallback_result = _agent_query_faturamento_base_local(ano_int)
+        if fallback_result and fallback_result.get("rows"):
+            return fallback_result
+
+        discovery_result = _agent_query_faturamento_discovery(ano_int)
+        if discovery_result:
+            return discovery_result
+
+        inventory = _agent_table_inventory(120)
+        available = [
+            f"{row.get('table_schema')}.{row.get('table_name')} ({row.get('table_type')}, {row.get('column_count')} cols)"
+            for row in inventory
+        ]
+        return {
+            "success": False,
+            "error": "O banco conectado não expôs nenhuma tabela/view com colunas prováveis de valor e data para calcular faturamento",
+            "available_tables_sample": available,
+            "rows": [],
+            "total": 0.0,
+        }
+    except Exception as exc:
+        return {"success": False, "error": str(exc), "rows": [], "total": 0.0}
+
+def get_agent_database_schema() -> str:
+    """Retorna um resumo textual seguro do schema usado pelo Agente IA.
+
+    O agente antigo funcionava porque recebia contexto estrutural do banco antes de gerar
+    consultas. Aqui fazemos o mesmo sobre SQL Server de produção, priorizando as tabelas
+    analíticas `fato_vendas` e CRM `crm_*` sincronizadas do Bitrix24.
+    """
+    try:
+        tables = fetch_all(
+            """
+            SELECT TABLE_SCHEMA AS table_schema, TABLE_NAME AS table_name
+            FROM INFORMATION_SCHEMA.TABLES
+            WHERE TABLE_TYPE = 'BASE TABLE'
+              AND (
+                    TABLE_NAME = 'fato_vendas'
+                 OR TABLE_NAME LIKE 'crm[_]%'
+                 OR TABLE_NAME IN ('users', 'metas', 'metas_2026', 'orcamento', 'orcamentos')
+              )
+            ORDER BY
+              CASE WHEN TABLE_NAME = 'fato_vendas' THEN 0
+                   WHEN TABLE_NAME LIKE 'crm[_]%' THEN 1
+                   ELSE 2 END,
+              TABLE_SCHEMA,
+              TABLE_NAME
+            """
+        )
+    except Exception as exc:
+        return f"Erro ao consultar INFORMATION_SCHEMA.TABLES: {exc}"
+
+    if not tables:
+        return (
+            "Nenhuma tabela analítica esperada foi encontrada por INFORMATION_SCHEMA. "
+            "Verifique se a API está conectada ao banco correto e se existem fato_vendas e/ou crm_*.")
+
+    parts: list[str] = []
+    for table in tables[:40]:
+        schema = table.get("table_schema") or "dbo"
+        name = table.get("table_name")
+        try:
+            columns = fetch_all(
+                """
+                SELECT COLUMN_NAME AS column_name, DATA_TYPE AS data_type
+                FROM INFORMATION_SCHEMA.COLUMNS
+                WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
+                ORDER BY ORDINAL_POSITION
+                """,
+                (schema, name),
+            )
+        except Exception as exc:
+            parts.append(f"- {schema}.{name}: erro ao ler colunas: {exc}")
+            continue
+
+        col_text = ", ".join(
+            f"{col.get('column_name')} {col.get('data_type')}"
+            for col in columns[:80]
+        )
+        if len(columns) > 80:
+            col_text += f", ... (+{len(columns) - 80} colunas)"
+        parts.append(f"- {schema}.{name}: {col_text}")
+
+    return "\n".join(parts)
+
+
+def _validate_agent_sql(query: str) -> str:
+    import re
+
+    sql = (query or "").strip()
+    sql = re.sub(r";\s*$", "", sql).strip()
+    if not sql:
+        raise ValueError("Consulta SQL vazia")
+    if ";" in sql:
+        raise ValueError("A ferramenta aceita apenas uma consulta por vez")
+
+    normalized = re.sub(r"/\*.*?\*/", " ", sql, flags=re.S)
+    normalized = re.sub(r"--.*?(\n|$)", " ", normalized)
+    normalized_l = normalized.lower().strip()
+
+    if not (normalized_l.startswith("select") or normalized_l.startswith("with")):
+        raise ValueError("Somente consultas SELECT ou WITH são permitidas")
+
+    forbidden = re.compile(
+        r"\b(insert|update|delete|drop|alter|truncate|merge|exec|execute|create|grant|revoke|backup|restore|xp_|sp_|openrowset|opendatasource)\b",
+        re.I,
+    )
+    if forbidden.search(normalized):
+        raise ValueError("A consulta contém comando não permitido")
+
+    return sql
+
+
+def execute_agent_sql(query: str, max_rows: int = 200) -> dict:
+    """Executa SELECT/WITH seguro no SQL Server para o Agente IA."""
+    try:
+        sql = _validate_agent_sql(query)
+    except Exception as exc:
+        return {"success": False, "error": str(exc), "rows": [], "row_count": 0}
+
+    safe_max_rows = max(1, min(int(max_rows or 200), 500))
+    try:
+        with get_connection() as connection:
+            cursor = connection.cursor()
+            cursor.execute(sql)
+            if cursor.description is None:
+                return {
+                    "success": False,
+                    "error": "A consulta não retornou um recordset. Use apenas SELECT/WITH.",
+                    "rows": [],
+                    "row_count": 0,
+                }
+            columns = [column[0] for column in cursor.description]
+            fetched = cursor.fetchmany(safe_max_rows + 1)
+    except Exception as exc:
+        return {"success": False, "error": str(exc), "query": sql, "rows": [], "row_count": 0}
+
+    limited = len(fetched) > safe_max_rows
+    rows = [
+        {columns[i]: _chat_value_to_json(value) for i, value in enumerate(row)}
+        for row in fetched[:safe_max_rows]
+    ]
+    return {
+        "success": True,
+        "query": sql,
+        "columns": columns,
+        "rows": rows,
+        "row_count": len(rows),
+        "limited": limited,
+        "limit": safe_max_rows,
+    }

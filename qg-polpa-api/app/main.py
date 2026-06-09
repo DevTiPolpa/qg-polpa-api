@@ -1781,10 +1781,12 @@ def api_panorama_crm_deals(
     )
 
 # =============================================================================
-# Agente IA / Chatbot — endpoints REST
+# Agente IA / Chatbot — endpoints REST com agente SQL sobre produção
 # =============================================================================
 
 import json as _chat_json
+import os as _chat_os
+import re as _chat_re
 import urllib.error as _chat_urllib_error
 import urllib.request as _chat_urllib_request
 from typing import Any as _ChatAny
@@ -1794,6 +1796,9 @@ from app.database import (
     get_chat_history,
     save_chat_message,
     clear_chat_history,
+    get_agent_database_schema,
+    execute_agent_sql,
+    get_faturamento_anual_por_categoria,
 )
 
 
@@ -1806,6 +1811,46 @@ class ChatSendRequest(BaseModel):
 class ChatQGRequest(BaseModel):
     message: str = Field(min_length=1)
     history: list[dict] = Field(default_factory=list)
+
+
+_CHAT_MAX_HISTORY_TURNS = 6
+_CHAT_MAX_TOOL_ROUNDS = 5
+
+
+_CHAT_BUSINESS_CONTEXT = """
+## CONTEXTO DA POLPA BRASIL
+
+A Polpa Brasil é uma fornecedora B2B de ingredientes alimentícios, especialmente frutas e vegetais desidratados. Os clientes principais são indústrias de alimentos e distribuidores/atacadistas. O ciclo comercial é longo: pode passar de 6 meses entre o primeiro contato e o fechamento. No CRM Bitrix24, um negócio ganho representa o primeiro pedido realizado pelo cliente; o campo de oportunidade de um negócio representa uma estimativa anual de faturamento, não necessariamente um pedido único.
+
+## DADOS DE FATURAMENTO / FORECAST / PROJETOS
+
+Para perguntas de faturamento, forecast, vendas firmes, novos projetos, clientes, produtos, vendedores, mercados, grupos de produto ou períodos, use prioritariamente a tabela `fato_vendas`. Ela representa a base analítica de produção do QG. Campos mais usados:
+
+- `valor_pendente`: valor financeiro para somas de faturamento/forecast/projetos.
+- `qtd_pendente_kg`: volume em kg.
+- `dt_entrega_cliente`: data de entrega usada para filtrar anos, meses e períodos.
+- `tipo_receita`: valores esperados `VENDA_FIRME`, `FORECAST`, `NOVO_PROJETO`, `DEVOLUCAO`.
+- `nome_vendedor`, `mercado_vendas`, `projeto`, `grupo_produto`, `nome_parc`, `cod_parc`, `descricao_produto`, `cod_produto`, `uf`.
+- Para análises gerais, exclua estoque mínimo: `(cod_top IS NULL OR cod_top != 1023)` e `([top] IS NULL OR [top] NOT LIKE '%ESTOQUE MINIM%')`.
+
+Ao responder “Qual o faturamento total de 2026?”, consulte `fato_vendas` filtrando `dt_entrega_cliente >= '2026-01-01'` e `< '2027-01-01'`, agrupe por `tipo_receita` e some `valor_pendente`. Reproduza a regra do projeto original local: Vendas Firmes soma `VENDA_FIRME` e `DEVOLUCAO` em valor absoluto, Forecast usa `FORECAST` e Projetos usa `NOVO_PROJETO`. Não exiba Devoluções como categoria separada. Inclua total e percentuais.
+
+## CRM BITRIX24
+
+Para perguntas sobre funil, negócios, etapas, pipelines, follow-up, atividades, leads, responsáveis, negócios parados e performance CRM, use as tabelas `crm_*`, especialmente `crm_deals`, `crm_users`, `crm_deal_stages`, `crm_pipelines`, `crm_leads`, `crm_tasks` e `crm_deal_stage_history`, se existirem na base.
+
+Regras críticas de CRM:
+- Funil Comercial principal: `category_id = '0'` ou `category_id IS NULL`, salvo se o usuário pedir outro funil.
+- Negócios em andamento: `stage_semantic_id = 'P'`.
+- Negócios ganhos: `stage_semantic_id = 'S'`.
+- Negócios perdidos: `stage_semantic_id = 'F'`.
+- Perguntas sobre “sem atividade”, “sem follow-up”, “sem tarefa”, “parados” ou “sem contato” devem usar `last_activity_time` de `crm_deals`, nunca `crm_tasks`, pois tarefas abertas não representam histórico completo.
+- Negócio sem atividade há mais de 15 dias é alerta; mais de 30 dias é crítico; mais de 60 dias é estagnado.
+
+## COMO RESPONDER
+
+Você deve consultar o banco antes de responder quando a pergunta envolver valores, rankings, contagens, percentuais, funil, faturamento, forecast, clientes, produtos, vendedores ou CRM. Prefira queries agregadas com `GROUP BY`, `COUNT`, `SUM`, `AVG` e `TOP`. Use SQL Server/T-SQL, não SQLite. Para datas, use `DATEDIFF`, `DATEFROMPARTS`, `YEAR`, `MONTH` e filtros com datas ISO. Responda em português do Brasil, de forma executiva, clara e objetiva. Inclua totais, percentuais e destaques quando relevante. Quando houver limitações de dados, explique de forma transparente.
+""".strip()
 
 
 def _chat_public_history(history: list[dict] | None, user_message: str, assistant_answer: str) -> list[dict]:
@@ -1824,52 +1869,22 @@ def _chat_public_history(history: list[dict] | None, user_message: str, assistan
 
 def _chat_fallback_answer(message: str, error_detail: str | None = None) -> str:
     base = (
-        "Recebi sua pergunta e a conversa foi registrada, mas o motor inteligente ainda não está "
-        "configurado nesta API Python. Configure OPENAI_API_KEY no .env da API para habilitar "
-        "respostas analíticas automáticas sobre faturamento, CRM e SQL Server."
+        "Recebi sua pergunta e a conversa foi registrada, mas não consegui executar a análise inteligente "
+        "com acesso aos dados da base de produção neste momento. Verifique se OPENAI_API_KEY está configurada, "
+        "se a API consegue conectar no SQL Server e se o banco conectado contém tabelas/views com colunas de valor e data para faturamento."
     )
     if error_detail:
         return f"{base}\n\nDetalhe técnico: {error_detail}"
     return base
 
 
-def _call_openai_chat(message: str, history: list[dict] | None) -> str | None:
-    api_key = os.getenv("OPENAI_API_KEY")
+def _chat_openai_request(payload: dict, timeout: int = 90) -> dict:
+    api_key = _chat_os.getenv("OPENAI_API_KEY")
     if not api_key:
-        return None
+        raise RuntimeError("OPENAI_API_KEY não configurada no ambiente da API Python")
 
-    api_base = os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1").rstrip("/")
-    model = os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini")
-
-    messages: list[dict[str, str]] = [
-        {
-            "role": "system",
-            "content": (
-                "Você é o Agente IA do QG Polpa Brasil. Responda em português do Brasil, "
-                "com foco em faturamento, CRM Bitrix24, funil de vendas, clientes e análises comerciais. "
-                "Quando não houver dados concretos disponíveis no contexto, seja transparente e peça o filtro ou período necessário."
-            ),
-        }
-    ]
-
-    for item in (history or [])[-20:]:
-        if not isinstance(item, dict):
-            continue
-        role = item.get("role")
-        content = item.get("content")
-        if role in {"user", "assistant"} and isinstance(content, str) and content.strip():
-            messages.append({"role": role, "content": content})
-
-    messages.append({"role": "user", "content": message})
-
-    body = _chat_json.dumps(
-        {
-            "model": model,
-            "messages": messages,
-            "temperature": 0.2,
-        }
-    ).encode("utf-8")
-
+    api_base = _chat_os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1").rstrip("/")
+    body = _chat_json.dumps(payload, ensure_ascii=False).encode("utf-8")
     request = _chat_urllib_request.Request(
         f"{api_base}/chat/completions",
         data=body,
@@ -1879,24 +1894,292 @@ def _call_openai_chat(message: str, history: list[dict] | None) -> str | None:
             "Content-Type": "application/json",
         },
     )
-
-    with _chat_urllib_request.urlopen(request, timeout=45) as response:
+    with _chat_urllib_request.urlopen(request, timeout=timeout) as response:
         raw = response.read().decode("utf-8")
-        data: dict[str, _ChatAny] = _chat_json.loads(raw)
+    return _chat_json.loads(raw)
+
+
+def _chat_normalize_model_history(history: list[dict] | None) -> list[dict[str, str]]:
+    messages: list[dict[str, str]] = []
+    for item in (history or [])[-(_CHAT_MAX_HISTORY_TURNS * 2):]:
+        if not isinstance(item, dict):
+            continue
+        role = item.get("role")
+        content = item.get("content")
+        if role in {"user", "assistant"} and isinstance(content, str) and content.strip():
+            messages.append({"role": role, "content": content[:8000]})
+    return messages
+
+
+def _chat_get_tool_call_message(choice_message: dict) -> dict:
+    return {
+        "role": "assistant",
+        "content": choice_message.get("content"),
+        "tool_calls": choice_message.get("tool_calls") or [],
+    }
+
+
+def _chat_extract_final_content(data: dict) -> str | None:
+    choices = data.get("choices") or []
+    if not choices:
+        return None
+    content = ((choices[0] or {}).get("message") or {}).get("content")
+    return content.strip() if isinstance(content, str) and content.strip() else None
+
+
+def _chat_build_system_prompt() -> str:
+    try:
+        schema = get_agent_database_schema()
+    except Exception as exc:
+        schema = f"Não foi possível carregar schema automaticamente: {exc}"
+
+    return f"""
+Você é o Agente IA do QG Polpa Brasil. Sua função é responder perguntas comerciais e analíticas usando dados reais da base SQL Server de produção.
+
+{_CHAT_BUSINESS_CONTEXT}
+
+## SCHEMA DISPONÍVEL NA BASE
+
+{schema}
+
+## REGRAS OBRIGATÓRIAS
+
+1. Para perguntas numéricas ou analíticas, sempre use a ferramenta `execute_sql` antes de responder.
+2. Execute apenas consultas SELECT/WITH. Nunca tente INSERT, UPDATE, DELETE, DROP, ALTER, TRUNCATE, MERGE, EXEC ou comandos administrativos.
+3. Use sintaxe SQL Server/T-SQL. Não use funções SQLite como JULIANDAY ou strftime.
+4. Se uma query falhar por nome de coluna/tabela, consulte o schema e corrija a query em uma nova tentativa.
+5. Responda em português do Brasil e destaque números em formato legível, como R$ 1.234.567,89 e percentuais.
+6. Não invente dados. Se a base não tiver informação suficiente, diga exatamente o que faltou.
+""".strip()
+
+
+def _call_openai_sql_agent(message: str, history: list[dict] | None) -> str:
+    model = _chat_os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini")
+    messages: list[dict] = [
+        {"role": "system", "content": _chat_build_system_prompt()},
+        *_chat_normalize_model_history(history),
+        {"role": "user", "content": message},
+    ]
+
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "execute_sql",
+                "description": "Executa uma consulta SELECT/WITH segura no SQL Server de produção e retorna linhas em JSON.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Consulta SQL Server somente leitura. Use SELECT ou WITH. Use TOP para limitar listas detalhadas.",
+                        }
+                    },
+                    "required": ["query"],
+                },
+            },
+        }
+    ]
+
+    for _round in range(_CHAT_MAX_TOOL_ROUNDS):
+        data = _chat_openai_request(
+            {
+                "model": model,
+                "messages": messages,
+                "tools": tools,
+                "tool_choice": "auto",
+                "temperature": 0.1,
+            }
+        )
         choices = data.get("choices") or []
         if not choices:
-            return None
-        content = ((choices[0] or {}).get("message") or {}).get("content")
-        return content.strip() if isinstance(content, str) and content.strip() else None
+            raise RuntimeError("OpenAI não retornou choices")
+        choice_message = (choices[0] or {}).get("message") or {}
+        tool_calls = choice_message.get("tool_calls") or []
+        if not tool_calls:
+            final = choice_message.get("content")
+            if isinstance(final, str) and final.strip():
+                return final.strip()
+            raise RuntimeError("OpenAI não retornou resposta final")
 
+        messages.append(_chat_get_tool_call_message(choice_message))
+        for tool_call in tool_calls:
+            function = tool_call.get("function") or {}
+            name = function.get("name")
+            args_raw = function.get("arguments") or "{}"
+            try:
+                args = _chat_json.loads(args_raw)
+            except Exception:
+                args = {}
+            if name != "execute_sql":
+                result = {"erro": f"Ferramenta desconhecida: {name}"}
+            else:
+                result = execute_agent_sql(str(args.get("query") or ""))
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tool_call.get("id"),
+                    "content": _chat_json.dumps(result, ensure_ascii=False, default=str),
+                }
+            )
+
+    data = _chat_openai_request(
+        {
+            "model": model,
+            "messages": messages + [
+                {
+                    "role": "user",
+                    "content": "Finalize a resposta com base nos resultados já obtidos. Se não houver dados suficientes, explique a limitação.",
+                }
+            ],
+            "temperature": 0.1,
+        }
+    )
+    final = _chat_extract_final_content(data)
+    if not final:
+        raise RuntimeError("Limite de rodadas de ferramenta atingido sem resposta final")
+    return final
+
+
+
+def _chat_detect_faturamento_anual_intent(message: str) -> int | None:
+    text = (message or "").strip().lower()
+    if not text:
+        return None
+    has_revenue_word = any(
+        token in text
+        for token in (
+            "faturamento",
+            "receita",
+            "venda",
+            "vendas",
+            "forecast",
+            "projeto",
+            "projetos",
+        )
+    )
+    if not has_revenue_word:
+        return None
+    match = _chat_re.search(r"\b(20\d{2}|2100)\b", text)
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def _chat_format_currency(value: float | int | None) -> str:
+    numeric = float(value or 0)
+    formatted = f"R$ {numeric:,.2f}"
+    return formatted.replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def _chat_format_percent(value: float | int | None) -> str:
+    numeric = float(value or 0)
+    return f"{numeric:.1f}%".replace(".", ",")
+
+
+def _chat_build_faturamento_anual_answer(message: str) -> str | None:
+    ano = _chat_detect_faturamento_anual_intent(message)
+    if ano is None:
+        return None
+
+    result = get_faturamento_anual_por_categoria(ano)
+    if not result.get("success"):
+        detail = result.get("error") or "erro desconhecido na consulta determinística"
+        linhas = [
+            f"Não consegui calcular o faturamento de **{ano}** porque a API conectou em um banco onde não encontrei uma fonte de faturamento compatível.",
+            "",
+            f"Detalhe técnico: {detail}",
+        ]
+        candidates = result.get("candidate_sources") or []
+        if candidates:
+            linhas.extend(["", "Possíveis fontes encontradas, mas ainda não retornaram valor para o ano solicitado:", "", "| Tabela/View | Coluna de valor | Coluna de data | Pontuação |", "|---|---|---|---:|"])
+            for item in candidates[:8]:
+                linhas.append(f"| `{item.get('schema')}.{item.get('table')}` | `{item.get('value_col')}` | `{item.get('date_col')}` | {item.get('score')} |")
+        available = result.get("available_tables_sample") or []
+        if available:
+            linhas.extend(["", "Amostra das tabelas/views visíveis no banco conectado:", ""])
+            for item in available[:25]:
+                linhas.append(f"- `{item}`")
+        linhas.append("")
+        linhas.append("Isso indica que a API pode estar apontando para outro banco/schema, ou que o faturamento está em uma tabela com nomes de colunas muito diferentes. Se aparecer uma tabela correta na lista acima, me envie o nome dela que eu fixo a consulta nela.")
+        return "\n".join(linhas)
+
+    rows = result.get("rows") or []
+    total = float(result.get("total") or 0)
+    if not rows or total == 0:
+        return (
+            f"Consultei a base SQL Server conectada para o ano de **{ano}**, "
+            "mas não encontrei faturamento com `dt_entrega_cliente` dentro desse período.\n\n"
+            "Verifique se os dados desse ano já foram carregados, ou se o faturamento está registrado em outro campo/período."
+        )
+
+    lines = [
+        f"Consultei a base SQL Server conectada e encontrei o seguinte faturamento para **{ano}**:",
+        "",
+        "| Categoria | Valor | % do total |",
+        "|---|---:|---:|",
+    ]
+    for item in rows:
+        lines.append(
+            f"| {item.get('categoria') or 'Sem categoria'} | {_chat_format_currency(item.get('total'))} | {_chat_format_percent(item.get('percentual'))} |"
+        )
+    lines.extend([
+        f"| **Total** | **{_chat_format_currency(total)}** | **100,0%** |",
+        "",
+        "**Destaques executivos:**",
+    ])
+
+    sorted_rows = sorted(rows, key=lambda item: float(item.get("total") or 0), reverse=True)
+    leader = sorted_rows[0]
+    lines.append(
+        f"A maior parcela do faturamento está em **{leader.get('categoria')}**, com **{_chat_format_currency(leader.get('total'))}** "
+        f"({_chat_format_percent(leader.get('percentual'))} do total)."
+    )
+
+    vendas_firmes = next((item for item in rows if item.get("categoria") == "Vendas Firmes"), None)
+    forecast = next((item for item in rows if item.get("categoria") == "Forecast"), None)
+    projetos = next((item for item in rows if item.get("categoria") == "Projetos"), None)
+
+    if vendas_firmes:
+        lines.append(
+            f"As **Vendas Firmes** somam **{_chat_format_currency(vendas_firmes.get('total'))}**, "
+            f"representando {_chat_format_percent(vendas_firmes.get('percentual'))} do total anual."
+        )
+    if forecast or projetos:
+        pipeline_total = float((forecast or {}).get("total") or 0) + float((projetos or {}).get("total") or 0)
+        pipeline_pct = (pipeline_total / total * 100.0) if total else 0.0
+        lines.append(
+            f"O componente projetado/pipeline, somando **Forecast** e **Projetos**, representa **{_chat_format_currency(pipeline_total)}** "
+            f"({_chat_format_percent(pipeline_pct)} do total)."
+        )
+
+    context = result.get("query_context") or {}
+    table = context.get("table") or "fato_vendas"
+    lines.append("")
+    lines.append(
+        f"Critério usado: soma de valores em `{table}`, filtrando o ano **{ano}**. Regra igual ao projeto original local: `VENDA_FIRME` e `DEVOLUCAO` entram em **Vendas Firmes**, `FORECAST` entra em **Forecast** e `NOVO_PROJETO` entra em **Projetos**. Quando `fato_vendas` não existe, uso fallback automático em tabelas/views locais e, por último, descoberta por colunas prováveis de valor e data."
+    )
+    return "\n".join(lines)
 
 def _chat_qg_generate_answer(message: str, history: list[dict] | None = None) -> dict:
+    deterministic_answer = _chat_build_faturamento_anual_answer(message)
+    if deterministic_answer:
+        return {
+            "answer": deterministic_answer,
+            "history": _chat_public_history(history, message, deterministic_answer),
+        }
+
     try:
-        answer = _call_openai_chat(message, history)
-        if not answer:
-            answer = _chat_fallback_answer(message)
+        answer = _call_openai_sql_agent(message, history)
     except _chat_urllib_error.HTTPError as exc:
-        answer = _chat_fallback_answer(message, f"OpenAI HTTP {exc.code}")
+        detail = f"OpenAI HTTP {exc.code}"
+        try:
+            detail_body = exc.read().decode("utf-8")[:800]
+            if detail_body:
+                detail = f"{detail}: {detail_body}"
+        except Exception:
+            pass
+        answer = _chat_fallback_answer(message, detail)
     except Exception as exc:
         answer = _chat_fallback_answer(message, str(exc))
 
@@ -1914,7 +2197,7 @@ def _require_chat_user(request: Request) -> dict:
 
 
 def _validate_internal_chat_secret(request: Request) -> None:
-    expected = os.getenv("INTERNAL_CHAT_SECRET", "")
+    expected = _chat_os.getenv("INTERNAL_CHAT_SECRET", "")
     if not expected:
         return
     received = request.headers.get("X-Internal-Secret", "")
