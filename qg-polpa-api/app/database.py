@@ -3471,3 +3471,153 @@ def get_panorama_deals(
             for row in rows_raw
         ]
     }
+
+# =============================================================================
+# Agente IA / Chatbot — persistência SQL Server
+# =============================================================================
+
+def _chat_datetime_to_iso(value):
+    if value is None:
+        return None
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return str(value)
+
+
+def ensure_chat_messages_table() -> None:
+    """Garante a existência da tabela usada pelo Agente IA.
+
+    A estrutura preserva o modelo já existente no servidor Node legado:
+    session_id, user_id, role, content e created_at.
+    """
+    with get_connection() as connection:
+        cursor = connection.cursor()
+        cursor.execute(
+            """
+            IF OBJECT_ID('dbo.chat_messages', 'U') IS NULL
+            BEGIN
+                CREATE TABLE dbo.chat_messages (
+                    id INT IDENTITY(1,1) NOT NULL PRIMARY KEY,
+                    session_id NVARCHAR(64) NOT NULL,
+                    user_id INT NULL,
+                    role NVARCHAR(20) NOT NULL,
+                    content NVARCHAR(MAX) NOT NULL,
+                    created_at DATETIME2 NOT NULL CONSTRAINT DF_chat_messages_created_at DEFAULT SYSUTCDATETIME()
+                );
+            END;
+
+            IF NOT EXISTS (
+                SELECT 1
+                FROM sys.indexes
+                WHERE name = 'IX_chat_messages_session_created'
+                  AND object_id = OBJECT_ID('dbo.chat_messages')
+            )
+            BEGIN
+                CREATE INDEX IX_chat_messages_session_created
+                ON dbo.chat_messages (session_id, created_at);
+            END;
+
+            IF NOT EXISTS (
+                SELECT 1
+                FROM sys.indexes
+                WHERE name = 'IX_chat_messages_user_session'
+                  AND object_id = OBJECT_ID('dbo.chat_messages')
+            )
+            BEGIN
+                CREATE INDEX IX_chat_messages_user_session
+                ON dbo.chat_messages (user_id, session_id);
+            END;
+            """
+        )
+        connection.commit()
+
+
+def _serialize_chat_message(row: dict) -> dict:
+    return {
+        "id": int(row.get("id")) if row.get("id") is not None else None,
+        "session_id": row.get("session_id"),
+        "role": row.get("role"),
+        "content": row.get("content"),
+        "created_at": _chat_datetime_to_iso(row.get("created_at")),
+    }
+
+
+def _serialize_chat_session(row: dict) -> dict:
+    return {
+        "session_id": row.get("session_id"),
+        "title": row.get("title"),
+        "last_at": _chat_datetime_to_iso(row.get("last_at")),
+        "message_count": int(row.get("message_count") or 0),
+    }
+
+
+def get_chat_history(session_id: str, limit: int = 50) -> list[dict]:
+    ensure_chat_messages_table()
+    safe_limit = max(1, min(int(limit or 50), 200))
+    rows = fetch_all(
+        f"""
+        SELECT TOP ({safe_limit})
+            id,
+            session_id,
+            role,
+            content,
+            created_at
+        FROM dbo.chat_messages
+        WHERE session_id = ?
+        ORDER BY created_at ASC, id ASC
+        """,
+        (session_id,),
+    )
+    return [_serialize_chat_message(row) for row in rows]
+
+
+def save_chat_message(session_id: str, user_id: int | None, role: str, content: str) -> dict:
+    ensure_chat_messages_table()
+    with get_connection() as connection:
+        cursor = connection.cursor()
+        cursor.execute(
+            """
+            INSERT INTO dbo.chat_messages (session_id, user_id, role, content)
+            VALUES (?, ?, ?, ?)
+            """,
+            (session_id, user_id, role, content),
+        )
+        connection.commit()
+    return {"success": True}
+
+
+def clear_chat_history(session_id: str) -> dict:
+    ensure_chat_messages_table()
+    with get_connection() as connection:
+        cursor = connection.cursor()
+        cursor.execute(
+            "DELETE FROM dbo.chat_messages WHERE session_id = ?",
+            (session_id,),
+        )
+        connection.commit()
+    return {"success": True}
+
+
+def get_chat_sessions(user_id: int) -> list[dict]:
+    ensure_chat_messages_table()
+    rows = fetch_all(
+        """
+        SELECT
+            m.session_id,
+            MIN(CASE WHEN m.role = 'user' THEN m.content ELSE NULL END) AS title,
+            MAX(m.created_at) AS last_at,
+            COUNT(*) AS message_count
+        FROM dbo.chat_messages m
+        WHERE m.session_id IN (
+            SELECT DISTINCT session_id
+            FROM dbo.chat_messages
+            WHERE user_id = ?
+        )
+        GROUP BY m.session_id
+        ORDER BY MAX(m.created_at) DESC
+        """,
+        (user_id,),
+    )
+
+    
+    return [_serialize_chat_session(row) for row in rows]

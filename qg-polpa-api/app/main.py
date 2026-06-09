@@ -1779,3 +1779,187 @@ def api_panorama_crm_deals(
         _panorama_normalize_origem(origem),
         _panorama_parse_user_id(userId if userId is not None else user_id),
     )
+
+# =============================================================================
+# Agente IA / Chatbot — endpoints REST
+# =============================================================================
+
+import json as _chat_json
+import urllib.error as _chat_urllib_error
+import urllib.request as _chat_urllib_request
+from typing import Any as _ChatAny
+
+from app.database import (
+    get_chat_sessions,
+    get_chat_history,
+    save_chat_message,
+    clear_chat_history,
+)
+
+
+class ChatSendRequest(BaseModel):
+    sessionId: str = Field(min_length=1, max_length=64)
+    message: str = Field(min_length=1)
+    history: list[dict] = Field(default_factory=list)
+
+
+class ChatQGRequest(BaseModel):
+    message: str = Field(min_length=1)
+    history: list[dict] = Field(default_factory=list)
+
+
+def _chat_public_history(history: list[dict] | None, user_message: str, assistant_answer: str) -> list[dict]:
+    normalized: list[dict] = []
+    for item in history or []:
+        if not isinstance(item, dict):
+            continue
+        role = item.get("role")
+        content = item.get("content")
+        if role in {"user", "assistant"} and isinstance(content, str) and content.strip():
+            normalized.append({"role": role, "content": content})
+    normalized.append({"role": "user", "content": user_message})
+    normalized.append({"role": "assistant", "content": assistant_answer})
+    return normalized[-30:]
+
+
+def _chat_fallback_answer(message: str, error_detail: str | None = None) -> str:
+    base = (
+        "Recebi sua pergunta e a conversa foi registrada, mas o motor inteligente ainda não está "
+        "configurado nesta API Python. Configure OPENAI_API_KEY no .env da API para habilitar "
+        "respostas analíticas automáticas sobre faturamento, CRM e SQL Server."
+    )
+    if error_detail:
+        return f"{base}\n\nDetalhe técnico: {error_detail}"
+    return base
+
+
+def _call_openai_chat(message: str, history: list[dict] | None) -> str | None:
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        return None
+
+    api_base = os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1").rstrip("/")
+    model = os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini")
+
+    messages: list[dict[str, str]] = [
+        {
+            "role": "system",
+            "content": (
+                "Você é o Agente IA do QG Polpa Brasil. Responda em português do Brasil, "
+                "com foco em faturamento, CRM Bitrix24, funil de vendas, clientes e análises comerciais. "
+                "Quando não houver dados concretos disponíveis no contexto, seja transparente e peça o filtro ou período necessário."
+            ),
+        }
+    ]
+
+    for item in (history or [])[-20:]:
+        if not isinstance(item, dict):
+            continue
+        role = item.get("role")
+        content = item.get("content")
+        if role in {"user", "assistant"} and isinstance(content, str) and content.strip():
+            messages.append({"role": role, "content": content})
+
+    messages.append({"role": "user", "content": message})
+
+    body = _chat_json.dumps(
+        {
+            "model": model,
+            "messages": messages,
+            "temperature": 0.2,
+        }
+    ).encode("utf-8")
+
+    request = _chat_urllib_request.Request(
+        f"{api_base}/chat/completions",
+        data=body,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+    )
+
+    with _chat_urllib_request.urlopen(request, timeout=45) as response:
+        raw = response.read().decode("utf-8")
+        data: dict[str, _ChatAny] = _chat_json.loads(raw)
+        choices = data.get("choices") or []
+        if not choices:
+            return None
+        content = ((choices[0] or {}).get("message") or {}).get("content")
+        return content.strip() if isinstance(content, str) and content.strip() else None
+
+
+def _chat_qg_generate_answer(message: str, history: list[dict] | None = None) -> dict:
+    try:
+        answer = _call_openai_chat(message, history)
+        if not answer:
+            answer = _chat_fallback_answer(message)
+    except _chat_urllib_error.HTTPError as exc:
+        answer = _chat_fallback_answer(message, f"OpenAI HTTP {exc.code}")
+    except Exception as exc:
+        answer = _chat_fallback_answer(message, str(exc))
+
+    return {
+        "answer": answer,
+        "history": _chat_public_history(history, message, answer),
+    }
+
+
+def _require_chat_user(request: Request) -> dict:
+    user = get_current_user_from_request(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Não autenticado")
+    return user
+
+
+def _validate_internal_chat_secret(request: Request) -> None:
+    expected = os.getenv("INTERNAL_CHAT_SECRET", "")
+    if not expected:
+        return
+    received = request.headers.get("X-Internal-Secret", "")
+    if received != expected:
+        raise HTTPException(status_code=401, detail="Segredo interno inválido")
+
+
+@app.get("/api/chatbot/sessions", tags=["Agente IA"])
+def api_chatbot_sessions(request: Request):
+    user = _require_chat_user(request)
+    return get_chat_sessions(int(user["id"]))
+
+
+@app.get("/api/chatbot/history/{session_id}", tags=["Agente IA"])
+def api_chatbot_history(session_id: str, request: Request, limit: int = 50):
+    _require_chat_user(request)
+    return get_chat_history(session_id, limit)
+
+
+@app.post("/api/chatbot/send", tags=["Agente IA"])
+def api_chatbot_send(payload: ChatSendRequest, request: Request):
+    user = _require_chat_user(request)
+    message = payload.message.strip()
+    if not message:
+        raise HTTPException(status_code=400, detail="Mensagem vazia")
+
+    save_chat_message(payload.sessionId, int(user["id"]), "user", message)
+    data = _chat_qg_generate_answer(message, payload.history)
+    answer = str(data.get("answer") or "")
+    save_chat_message(payload.sessionId, None, "assistant", answer)
+
+    return {
+        "reply": answer,
+        "agentHistory": data.get("history") or [],
+    }
+
+
+@app.delete("/api/chatbot/sessions/{session_id}", tags=["Agente IA"])
+def api_chatbot_delete_session(session_id: str, request: Request):
+    _require_chat_user(request)
+    clear_chat_history(session_id)
+    return {"success": True}
+
+
+@app.post("/api/chat-qg", tags=["Agente IA"])
+def api_chat_qg(payload: ChatQGRequest, request: Request):
+    _validate_internal_chat_secret(request)
+    return _chat_qg_generate_answer(payload.message.strip(), payload.history)
