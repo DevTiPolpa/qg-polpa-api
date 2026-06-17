@@ -72,8 +72,26 @@ app.add_middleware(
 COOKIE_NAME = "qg_session"
 COOKIE_SECRET = os.getenv("COOKIE_SECRET", "qgpolpabrasil_dev_secret")
 COOKIE_MAX_AGE_SECONDS = 365 * 24 * 60 * 60
-COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() in {"1", "true", "yes", "on"}
-COOKIE_SAMESITE = os.getenv("COOKIE_SAMESITE", "none" if COOKIE_SECURE else "lax")
+
+# IMPORTANTE PARA VERCEL + NGROK:
+# Quando o frontend está em https://qg-polpa-brasil.vercel.app e a API em
+# https://*.ngrok-free.dev, o navegador considera a chamada como cross-site.
+# Nesse cenário, o cookie de sessão só é enviado no fetch/XHR se estiver com
+# SameSite=None e Secure=True. O valor antigo default false/lax causa exatamente
+# o erro 401 em /api/auth/change-password, pois o backend não recebe o cookie.
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+COOKIE_SECURE = _env_bool("COOKIE_SECURE", True)
+COOKIE_SAMESITE = os.getenv("COOKIE_SAMESITE", "none" if COOKIE_SECURE else "lax").strip().lower()
+
+# Browsers modernos rejeitam SameSite=None sem Secure. Mantém proteção para não
+# gerar cookie inválido em produção.
+if COOKIE_SAMESITE == "none" and not COOKIE_SECURE:
+    COOKIE_SECURE = True
 
 class Meta2026UpsertRequest(BaseModel):
     nomeVendedor: str = Field(min_length=1)
@@ -131,7 +149,20 @@ def create_session_token(user_id: int, role: str) -> str:
 
 
 def get_current_user_from_request(request: Request) -> dict | None:
+    """Obtém o usuário autenticado pelo cookie de sessão.
+
+    O fluxo principal usa cookie HttpOnly. Como fallback técnico, a função
+    também aceita Authorization: Bearer <token>, útil em testes ou em cenários
+    onde o navegador bloqueie cookies de terceiros. O frontend atual pode
+    continuar usando cookies normalmente.
+    """
     token = request.cookies.get(COOKIE_NAME)
+
+    if not token:
+        authorization = request.headers.get("Authorization") or request.headers.get("authorization")
+        if authorization and authorization.lower().startswith("bearer "):
+            token = authorization.split(" ", 1)[1].strip()
+
     if not token:
         return None
 
@@ -385,7 +416,13 @@ def auth_login(payload: AuthLoginRequest, response: Response):
         set_session_cookie(response, token)
         update_last_signed_in(user["id"])
 
-        return serialize_auth_user(user)
+        auth_user = serialize_auth_user(user)
+        # Mantém compatibilidade com o frontend atual e disponibiliza o token
+        # como fallback para Authorization: Bearer, caso seja necessário.
+        return {
+            **auth_user,
+            "accessToken": token,
+        }
 
     except HTTPException:
         raise
