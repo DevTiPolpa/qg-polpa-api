@@ -550,6 +550,7 @@ def _normalize_filtros(filtros: dict | None) -> dict:
         "codParc": filtros.get("codParc"),
         "codProduto": filtros.get("codProduto"),
         "codParcs": _split_int_filter(filtros.get("codParcs") or filtros.get("codParc")),
+        "codProdutos": _split_int_filter(filtros.get("codProdutos") or filtros.get("codProduto")),
         "uf": filtros.get("uf"),
     }
 
@@ -585,9 +586,9 @@ def build_fato_vendas_where(filtros: dict | None, alias: str = "fv") -> tuple[st
     clause = _build_in_clause(f"{alias}.cod_parc", f["codParcs"], params)
     if clause:
         parts.append(clause)
-    if f["codProduto"]:
-        parts.append(f"{alias}.cod_produto = ?")
-        params.append(int(f["codProduto"]))
+    clause = _build_in_clause(f"{alias}.cod_produto", f["codProdutos"], params)
+    if clause:
+        parts.append(clause)
     if f["uf"]:
         parts.append(f"{alias}.uf = ?")
         params.append(f["uf"])
@@ -1159,6 +1160,7 @@ def _dash_normalize_filtros(filtros: dict | None) -> dict:
         "codParc": filtros.get("codParc"),
         "codProduto": filtros.get("codProduto"),
         "codParcs": _split_int_filter(filtros.get("codParcs") or filtros.get("codParc")),
+        "codProdutos": _split_int_filter(filtros.get("codProdutos") or filtros.get("codProduto")),
         "uf": filtros.get("uf"),
     }
 
@@ -1195,9 +1197,9 @@ def _dash_build_fato_where(filtros: dict | None, alias: str = "fv", ignore_tipo_
     clause = _dash_build_in_clause(f"{alias}.cod_parc", f["codParcs"], params)
     if clause:
         parts.append(clause)
-    if f["codProduto"]:
-        parts.append(f"{alias}.cod_produto = ?")
-        params.append(int(f["codProduto"]))
+    clause = _dash_build_in_clause(f"{alias}.cod_produto", f["codProdutos"], params)
+    if clause:
+        parts.append(clause)
     if f["uf"]:
         parts.append(f"{alias}.uf = ?")
         params.append(f["uf"])
@@ -1627,10 +1629,38 @@ def get_dashboard_original_filtros_disponiveis() -> dict:
             """
         )
         clientes = [{"codParc": _dash_int(row.cod_parc), "razaoSocial": row.razao_social} for row in cursor.fetchall()]
+        cursor.execute(
+            """
+            SELECT
+                fv.grupo_produto AS grupo_produto,
+                CAST(fv.cod_produto AS VARCHAR(20)) AS cod_produto,
+                COALESCE(MAX(dp.nome_produto), MAX(fv.nome_produto), CAST(fv.cod_produto AS NVARCHAR(20))) AS nome_produto
+            FROM dbo.fato_vendas fv
+            LEFT JOIN dbo.dim_produto dp ON fv.cod_produto = dp.cod_produto
+            WHERE fv.grupo_produto IS NOT NULL AND fv.cod_produto IS NOT NULL
+            GROUP BY fv.grupo_produto, fv.cod_produto
+            ORDER BY fv.grupo_produto, nome_produto
+            """
+        )
+        produtos_por_grupo: dict[str, list[dict]] = {}
+        for row in cursor.fetchall():
+            grupo = row.grupo_produto
+            if not grupo:
+                continue
+            produtos_por_grupo.setdefault(grupo, []).append(
+                {"codProduto": row.cod_produto, "nomeProduto": row.nome_produto}
+            )
     finally:
         cursor.close()
         conn.close()
-    return {"mercados": mercados, "vendedores": vendedores, "projetos": projetos, "grupos": grupos, "clientes": clientes}
+    return {
+        "mercados": mercados,
+        "vendedores": vendedores,
+        "projetos": projetos,
+        "grupos": grupos,
+        "clientes": clientes,
+        "produtosPorGrupo": produtos_por_grupo,
+    }
 
 
 def get_dashboard_original_resumo(filtros: dict | None = None, limit_clientes: int | None = None) -> dict:
@@ -1708,6 +1738,7 @@ def _np_normalize_filtros(filtros: dict | None) -> dict:
         "codParc": filtros.get("codParc"),
         "codProduto": filtros.get("codProduto"),
         "codParcs": _split_int_filter(filtros.get("codParcs") or filtros.get("codParc")),
+        "codProdutos": _split_int_filter(filtros.get("codProdutos") or filtros.get("codProduto")),
         "uf": filtros.get("uf"),
     }
 
@@ -1742,9 +1773,9 @@ def _np_build_fato_where(filtros: dict | None, alias: str = "fv", include_date: 
     clause = _np_build_in_clause(f"{alias}.cod_parc", f["codParcs"], params)
     if clause:
         parts.append(clause)
-    if f["codProduto"]:
-        parts.append(f"{alias}.cod_produto = ?")
-        params.append(int(f["codProduto"]))
+    clause = _np_build_in_clause(f"{alias}.cod_produto", f["codProdutos"], params)
+    if clause:
+        parts.append(clause)
     if f["uf"]:
         parts.append(f"{alias}.uf = ?")
         params.append(f["uf"])
@@ -2526,6 +2557,36 @@ def list_historico_cliente_produtos(cod_parc: int, filtros: dict | None = None) 
     ]
 
 
+def list_historico_cliente_produto_mensal(cod_parc: int, cod_produto: str, filtros: dict | None = None) -> list[dict]:
+    """Detalhamento mês a mês de um produto dentro de um cliente (3º nível de expansão)."""
+    f = dict(filtros or {})
+    f["codParcs"] = [cod_parc]
+    f.pop("codProdutos", None)
+    clause, params = _hc_build_where(f)
+    rows = fetch_all(
+        f"""
+        SELECT
+            FORMAT(fv.dt_entrega_cliente, 'yyyy-MM') AS mes,
+            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS quantidade,
+            COALESCE(SUM(fv.valor_pendente), 0) AS valor
+        FROM fato_vendas fv
+        {clause}
+        AND CAST(fv.cod_produto AS NVARCHAR(50)) = ?
+        GROUP BY FORMAT(fv.dt_entrega_cliente, 'yyyy-MM')
+        ORDER BY FORMAT(fv.dt_entrega_cliente, 'yyyy-MM')
+        """,
+        (*params, str(cod_produto)),
+    )
+    return [
+        {
+            "mes": r.get("mes"),
+            "quantidade": _hc_number(r.get("quantidade")),
+            "valor": _hc_number(r.get("valor")),
+        }
+        for r in rows
+    ]
+
+
 # =============================================================================
 # Comparativo Semanal / Snapshot — dados originais migrados para REST
 # =============================================================================
@@ -2573,9 +2634,9 @@ def _build_snapshot_hist_where(filtros: dict | None, alias: str = "fs") -> tuple
     clause = _build_in_clause(f"{alias}.cod_parc", f["codParcs"], params)
     if clause:
         parts.append(clause)
-    if f["codProduto"]:
-        parts.append(f"{alias}.cod_produto = ?")
-        params.append(int(f["codProduto"]))
+    clause = _build_in_clause(f"{alias}.cod_produto", f["codProdutos"], params)
+    if clause:
+        parts.append(clause)
     if f["uf"]:
         parts.append(f"{alias}.uf = ?")
         params.append(f["uf"])
@@ -2845,6 +2906,9 @@ def _build_recorrentes_real_where(filtros: dict | None, alias: str = "fv") -> tu
     clause = _build_in_clause(f"{alias}.cod_parc", f["codParcs"], params)
     if clause:
         parts.append(clause)
+    clause = _build_in_clause(f"{alias}.cod_produto", f["codProdutos"], params)
+    if clause:
+        parts.append(clause)
     clause = _build_in_clause(f"{alias}.grupo_produto", f["gruposProduto"], params)
     if clause:
         parts.append(clause)
@@ -2868,6 +2932,9 @@ def _build_recorrentes_orcamento_where(filtros: dict | None, alias: str = "o") -
         parts.append(f"{alias}.mercado_vendas IN ({placeholders})")
         params.extend(f["mercados"])
     clause = _build_in_clause(f"{alias}.cod_parc", f["codParcs"], params)
+    if clause:
+        parts.append(clause)
+    clause = _build_in_clause(f"{alias}.cod_produto", f["codProdutos"], params)
     if clause:
         parts.append(clause)
     clause = _build_in_clause(f"{alias}.grupo_produto", f["gruposProduto"], params)

@@ -612,6 +612,7 @@ def _build_vendedores_filtros(
     codParc: int | None = None,
     codProduto: int | None = None,
     codParcs: list[int] | None = None,
+    codProdutos: list[int] | None = None,
 ) -> dict:
     return {
         "dataInicio": dataInicio or "2026-01-01",
@@ -625,6 +626,7 @@ def _build_vendedores_filtros(
         "codParc": codParc,
         "codProduto": codProduto,
         "codParcs": codParcs or ([codParc] if codParc is not None else []),
+        "codProdutos": codProdutos or ([codProduto] if codProduto is not None else []),
     }
 
 
@@ -641,11 +643,12 @@ def api_vendedores_original_resumo(
     codParc: int | None = None,
     codProduto: int | None = None,
     codParcs: list[int] | None = Query(default=None),
+    codProdutos: list[int] | None = Query(default=None),
     limitClientes: int = Query(default=50, ge=1, le=500),
 ):
     filtros = _build_vendedores_filtros(
         dataInicio, dataFim, mercados, vendedores, projetos, gruposProduto, tiposReceita, uf, codParc, codProduto,
-        codParcs,
+        codParcs, codProdutos,
     )
     return get_vendedores_original_resumo(filtros, limitClientes)
 
@@ -865,6 +868,7 @@ def _build_dashboard_filtros(
     codParc: int | None = None,
     codProduto: int | None = None,
     codParcs: list[int] | None = None,
+    codProdutos: list[int] | None = None,
 ) -> dict:
     return {
         "dataInicio": dataInicio or "2026-01-01",
@@ -878,6 +882,7 @@ def _build_dashboard_filtros(
         "codParc": codParc,
         "codProduto": codProduto,
         "codParcs": codParcs or ([codParc] if codParc is not None else []),
+        "codProdutos": codProdutos or ([codProduto] if codProduto is not None else []),
     }
 
 
@@ -894,11 +899,12 @@ def api_dashboard_original_resumo(
     codParc: int | None = None,
     codProduto: int | None = None,
     codParcs: list[int] | None = Query(default=None),
+    codProdutos: list[int] | None = Query(default=None),
     limitClientes: int | None = Query(default=None, ge=1, le=500),
 ):
     filtros = _build_dashboard_filtros(
         dataInicio, dataFim, mercados, vendedores, projetos, gruposProduto, tiposReceita, uf, codParc, codProduto,
-        codParcs,
+        codParcs, codProdutos,
     )
     return get_dashboard_original_resumo(filtros, limitClientes)
 
@@ -1152,6 +1158,7 @@ def _build_novos_projetos_filtros(
     codParc: int | None = None,
     codProduto: int | None = None,
     codParcs: list[int] | None = None,
+    codProdutos: list[int] | None = None,
 ) -> dict:
     return {
         "dataInicio": dataInicio or "2026-01-01",
@@ -1167,6 +1174,7 @@ def _build_novos_projetos_filtros(
         "codParc": codParc,
         "codProduto": codProduto,
         "codParcs": codParcs or ([codParc] if codParc is not None else []),
+        "codProdutos": codProdutos or ([codProduto] if codProduto is not None else []),
     }
 
 
@@ -1189,11 +1197,12 @@ def api_novos_projetos_kpis(
     codParc: int | None = None,
     codProduto: int | None = None,
     codParcs: list[int] | None = Query(default=None),
+    codProdutos: list[int] | None = Query(default=None),
     modoCard: str | None = Query(default=None),
 ):
     filtros = _build_novos_projetos_filtros(
         dataInicio, dataFim, mercados, vendedores, projetos, gruposProduto, tiposReceita, uf, codParc, codProduto,
-        codParcs,
+        codParcs, codProdutos,
     )
     return get_novos_projetos_kpis(filtros, _normalize_modo_card_novos_projetos(modoCard))
 
@@ -1211,11 +1220,12 @@ def api_novos_projetos_por_mes(
     codParc: int | None = None,
     codProduto: int | None = None,
     codParcs: list[int] | None = Query(default=None),
+    codProdutos: list[int] | None = Query(default=None),
     modoCard: str | None = Query(default=None),
 ):
     filtros = _build_novos_projetos_filtros(
         dataInicio, dataFim, mercados, vendedores, projetos, gruposProduto, tiposReceita, uf, codParc, codProduto,
-        codParcs,
+        codParcs, codProdutos,
     )
     return list_novos_projetos_por_mes(filtros, _normalize_modo_card_novos_projetos(modoCard))
 
@@ -1233,11 +1243,12 @@ def api_novos_projetos_lista(
     codParc: int | None = None,
     codProduto: int | None = None,
     codParcs: list[int] | None = Query(default=None),
+    codProdutos: list[int] | None = Query(default=None),
     modoCard: str | None = Query(default=None),
 ):
     filtros = _build_novos_projetos_filtros(
         dataInicio, dataFim, mercados, vendedores, projetos, gruposProduto, tiposReceita, uf, codParc, codProduto,
-        codParcs,
+        codParcs, codProdutos,
     )
     return list_novos_projetos(filtros, _normalize_modo_card_novos_projetos(modoCard))
 
@@ -1255,10 +1266,11 @@ def api_novos_projetos_recorrentes_convertidos(
     codParc: int | None = None,
     codProduto: int | None = None,
     codParcs: list[int] | None = Query(default=None),
+    codProdutos: list[int] | None = Query(default=None),
 ):
     filtros = _build_novos_projetos_filtros(
         dataInicio, dataFim, mercados, vendedores, projetos, gruposProduto, tiposReceita, uf, codParc, codProduto,
-        codParcs,
+        codParcs, codProdutos,
     )
     return list_novos_projetos_recorrentes_convertidos(filtros)
 
@@ -1296,6 +1308,7 @@ from app.database import (
     list_historico_clientes_por_estado,
     list_historico_clientes_por_segmento,
     list_historico_cliente_produtos,
+    list_historico_cliente_produto_mensal,
 )
 
 
@@ -1467,6 +1480,24 @@ def api_historico_cliente_produtos(
     return list_historico_cliente_produtos(cod_parc, filtros)
 
 
+@app.get("/api/historico-clientes/clientes/{cod_parc}/produtos/{cod_produto}/mensal")
+def api_historico_cliente_produto_mensal(
+    cod_parc: int,
+    cod_produto: str,
+    anos: list[int] | None = Query(default=None),
+    meses: list[int] | None = Query(default=None),
+    mercados: list[str] | None = Query(default=None),
+    gruposProduto: list[str] | None = Query(default=None),
+    vendedores: list[str] | None = Query(default=None),
+    dataInicio: str | None = None,
+    dataFim: str | None = None,
+):
+    filtros = _build_historico_clientes_filtros(
+        anos, meses, None, mercados, gruposProduto, vendedores, None, None, dataInicio, dataFim
+    )
+    return list_historico_cliente_produto_mensal(cod_parc, cod_produto, filtros)
+
+
 # ============================================================
 # Comparativo Semanal / Snapshot (/snapshot) - API REST
 # ============================================================
@@ -1509,6 +1540,7 @@ def _build_snapshot_filtros(
     cod_parc=None,
     codParc=None,
     codParcs=None,
+    codProdutos=None,
     uf=None,
 ):
     filtros = {
@@ -1521,6 +1553,7 @@ def _build_snapshot_filtros(
         "dataFim": dataFim or data_fim,
         "codParc": codParc or cod_parc,
         "codParcs": codParcs or ([codParc or cod_parc] if (codParc or cod_parc) is not None else []),
+        "codProdutos": codProdutos or [],
         "uf": uf,
     }
     return {key: value for key, value in filtros.items() if value not in (None, [], "")}
@@ -1547,6 +1580,7 @@ def api_snapshot_historico(
     cod_parc: int | None = None,
     codParc: int | None = None,
     codParcs: list[int] | None = Query(default=None),
+    codProdutos: list[int] | None = Query(default=None),
     uf: str | None = None,
 ):
     filtros = _build_snapshot_filtros(
@@ -1564,6 +1598,7 @@ def api_snapshot_historico(
         cod_parc=cod_parc,
         codParc=codParc,
         codParcs=codParcs,
+        codProdutos=codProdutos,
         uf=uf,
     )
     return get_snapshot_historico(filtros)
@@ -1656,6 +1691,7 @@ def _build_recorrentes_filtros(
     cod_parc=None,
     codParcs=None,
     gruposProduto=None,
+    codProdutos=None,
 ):
     filtros = {
         "dataInicio": dataInicio or data_inicio,
@@ -1665,6 +1701,7 @@ def _build_recorrentes_filtros(
         "codParc": codParc or cod_parc,
         "codParcs": codParcs or ([codParc or cod_parc] if (codParc or cod_parc) is not None else []),
         "gruposProduto": _csv_or_list_recorrentes(gruposProduto),
+        "codProdutos": codProdutos or [],
     }
     return {key: value for key, value in filtros.items() if value not in (None, [], "")}
 
@@ -1686,8 +1723,9 @@ def api_recorrentes_kpis(
     cod_parc: int | None = None,
     codParcs: list[int] | None = Query(default=None),
     gruposProduto: list[str] | None = Query(default=None),
+    codProdutos: list[int] | None = Query(default=None),
 ):
-    filtros = _build_recorrentes_filtros(dataInicio, dataFim, mercados, vendedores, codParc, data_inicio, data_fim, cod_parc, codParcs, gruposProduto)
+    filtros = _build_recorrentes_filtros(dataInicio, dataFim, mercados, vendedores, codParc, data_inicio, data_fim, cod_parc, codParcs, gruposProduto, codProdutos)
     return get_recorrentes_kpis(filtros)
 
 
@@ -1703,8 +1741,9 @@ def api_recorrentes_tabela(
     cod_parc: int | None = None,
     codParcs: list[int] | None = Query(default=None),
     gruposProduto: list[str] | None = Query(default=None),
+    codProdutos: list[int] | None = Query(default=None),
 ):
-    filtros = _build_recorrentes_filtros(dataInicio, dataFim, mercados, vendedores, codParc, data_inicio, data_fim, cod_parc, codParcs, gruposProduto)
+    filtros = _build_recorrentes_filtros(dataInicio, dataFim, mercados, vendedores, codParc, data_inicio, data_fim, cod_parc, codParcs, gruposProduto, codProdutos)
     return list_recorrentes_tabela(filtros)
 
 
