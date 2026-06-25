@@ -3006,7 +3006,7 @@ def list_recorrentes_tabela(filtros: dict | None = None) -> list[dict]:
         orc_data AS (
             SELECT
                 o.cod_parc,
-                MAX(COALESCE(dco.razao_social, fany.RAZAOSOCIAL)) AS orcRazaoSocial,
+                MAX(COALESCE(dco.razao_social, fany.RAZAOSOCIAL, o.razao_social)) AS orcRazaoSocial,
                 COALESCE(SUM(o.valor_pendente), 0) AS orcVal,
                 COALESCE(SUM(o.qtd_pendente_kg), 0) AS orcKg
             FROM dbo.orcamento_2026 o
@@ -4388,16 +4388,19 @@ def get_agent_database_schema() -> str:
             """
             SELECT TABLE_SCHEMA AS table_schema, TABLE_NAME AS table_name
             FROM INFORMATION_SCHEMA.TABLES
-            WHERE TABLE_TYPE = 'BASE TABLE'
+            WHERE TABLE_TYPE IN ('BASE TABLE', 'VIEW')
               AND (
                     TABLE_NAME = 'fato_vendas'
                  OR TABLE_NAME LIKE 'crm[_]%'
-                 OR TABLE_NAME IN ('users', 'metas', 'metas_2026', 'orcamento', 'orcamentos')
+                 OR TABLE_NAME LIKE 'dim[_]%'
+                 OR TABLE_NAME IN ('users', 'metas', 'metas_2026', 'orcamento_2026')
               )
             ORDER BY
               CASE WHEN TABLE_NAME = 'fato_vendas' THEN 0
-                   WHEN TABLE_NAME LIKE 'crm[_]%' THEN 1
-                   ELSE 2 END,
+                   WHEN TABLE_NAME LIKE 'dim[_]%' THEN 1
+                   WHEN TABLE_NAME = 'orcamento_2026' THEN 2
+                   WHEN TABLE_NAME LIKE 'crm[_]%' THEN 3
+                   ELSE 4 END,
               TABLE_SCHEMA,
               TABLE_NAME
             """
