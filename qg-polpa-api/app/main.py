@@ -1347,6 +1347,7 @@ def _build_historico_clientes_filtros(
     codProdutos,
     dataInicio=None,
     dataFim=None,
+    projetos=None,
 ):
     filtros = {
         "anos": _int_csv_or_list_historico_clientes(anos),
@@ -1359,6 +1360,7 @@ def _build_historico_clientes_filtros(
         "codProdutos": _csv_or_list_historico_clientes(codProdutos),
         "dataInicio": dataInicio,
         "dataFim": dataFim,
+        "projetos": _csv_or_list_historico_clientes(projetos),
     }
     return {k: v for k, v in filtros.items() if v}
 
@@ -1380,9 +1382,10 @@ def api_historico_clientes_kpis(
     codProdutos: list[str] | None = Query(default=None),
     dataInicio: str | None = None,
     dataFim: str | None = None,
+    projetos: list[str] | None = Query(default=None),
 ):
     filtros = _build_historico_clientes_filtros(
-        anos, meses, codParcs, mercados, gruposProduto, vendedores, ufs, codProdutos, dataInicio, dataFim
+        anos, meses, codParcs, mercados, gruposProduto, vendedores, ufs, codProdutos, dataInicio, dataFim, projetos
     )
     return get_historico_clientes_kpis(filtros)
 
@@ -1399,9 +1402,10 @@ def api_historico_clientes_lista(
     codProdutos: list[str] | None = Query(default=None),
     dataInicio: str | None = None,
     dataFim: str | None = None,
+    projetos: list[str] | None = Query(default=None),
 ):
     filtros = _build_historico_clientes_filtros(
-        anos, meses, codParcs, mercados, gruposProduto, vendedores, ufs, codProdutos, dataInicio, dataFim
+        anos, meses, codParcs, mercados, gruposProduto, vendedores, ufs, codProdutos, dataInicio, dataFim, projetos
     )
     return list_historico_clientes(filtros)
 
@@ -1418,9 +1422,10 @@ def api_historico_clientes_evolucao_mensal(
     codProdutos: list[str] | None = Query(default=None),
     dataInicio: str | None = None,
     dataFim: str | None = None,
+    projetos: list[str] | None = Query(default=None),
 ):
     filtros = _build_historico_clientes_filtros(
-        anos, meses, codParcs, mercados, gruposProduto, vendedores, ufs, codProdutos, dataInicio, dataFim
+        anos, meses, codParcs, mercados, gruposProduto, vendedores, ufs, codProdutos, dataInicio, dataFim, projetos
     )
     return list_historico_clientes_evolucao_mensal(filtros)
 
@@ -1437,9 +1442,10 @@ def api_historico_clientes_por_estado(
     codProdutos: list[str] | None = Query(default=None),
     dataInicio: str | None = None,
     dataFim: str | None = None,
+    projetos: list[str] | None = Query(default=None),
 ):
     filtros = _build_historico_clientes_filtros(
-        anos, meses, codParcs, mercados, gruposProduto, vendedores, ufs, codProdutos, dataInicio, dataFim
+        anos, meses, codParcs, mercados, gruposProduto, vendedores, ufs, codProdutos, dataInicio, dataFim, projetos
     )
     return list_historico_clientes_por_estado(filtros)
 
@@ -1456,9 +1462,10 @@ def api_historico_clientes_por_segmento(
     codProdutos: list[str] | None = Query(default=None),
     dataInicio: str | None = None,
     dataFim: str | None = None,
+    projetos: list[str] | None = Query(default=None),
 ):
     filtros = _build_historico_clientes_filtros(
-        anos, meses, codParcs, mercados, gruposProduto, vendedores, ufs, codProdutos, dataInicio, dataFim
+        anos, meses, codParcs, mercados, gruposProduto, vendedores, ufs, codProdutos, dataInicio, dataFim, projetos
     )
     return list_historico_clientes_por_segmento(filtros)
 
@@ -1473,9 +1480,10 @@ def api_historico_cliente_produtos(
     vendedores: list[str] | None = Query(default=None),
     dataInicio: str | None = None,
     dataFim: str | None = None,
+    projetos: list[str] | None = Query(default=None),
 ):
     filtros = _build_historico_clientes_filtros(
-        anos, meses, None, mercados, gruposProduto, vendedores, None, None, dataInicio, dataFim
+        anos, meses, None, mercados, gruposProduto, vendedores, None, None, dataInicio, dataFim, projetos
     )
     return list_historico_cliente_produtos(cod_parc, filtros)
 
@@ -1491,9 +1499,10 @@ def api_historico_cliente_produto_mensal(
     vendedores: list[str] | None = Query(default=None),
     dataInicio: str | None = None,
     dataFim: str | None = None,
+    projetos: list[str] | None = Query(default=None),
 ):
     filtros = _build_historico_clientes_filtros(
-        anos, meses, None, mercados, gruposProduto, vendedores, None, None, dataInicio, dataFim
+        anos, meses, None, mercados, gruposProduto, vendedores, None, None, dataInicio, dataFim, projetos
     )
     return list_historico_cliente_produto_mensal(cod_parc, cod_produto, filtros)
 
