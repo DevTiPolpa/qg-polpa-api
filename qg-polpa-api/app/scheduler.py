@@ -6,7 +6,7 @@ from app.database import criar_forecast_snapshot, get_snapshot_datas
 
 # Quarta-feira às 08h30 (datetime.weekday(): Segunda=0 ... Quarta=2)
 TARGET_WEEKDAY = 2
-TARGET_HOUR = 8
+TARGET_HOUR = 14
 TARGET_MINUTE = 30
 
 
@@ -42,6 +42,6 @@ def _loop() -> None:
 
 
 def iniciar_scheduler_snapshot_semanal() -> None:
-    """Inicia uma thread em segundo plano que congela o forecast toda quarta-feira às 08h30."""
+    """Inicia uma thread em segundo plano que congela o forecast toda quarta-feira às 14h30."""
     thread = threading.Thread(target=_loop, daemon=True, name="snapshot-semanal-scheduler")
     thread.start()

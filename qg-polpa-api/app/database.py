@@ -522,6 +522,25 @@ def _build_in_clause(column: str, values: list[str], params: list[Any]) -> str |
     return f"{column} IN ({','.join(['?'] * len(values))})"
 
 
+def _build_periodos_clause(alias: str, column: str, periodos: list[str], params: list) -> str | None:
+    """periodos: lista de strings 'YYYY-MM'. Gera cláusula (ANO*100+MES) IN (...) que
+    seleciona exatamente os pares ano/mês informados, permitindo combinar meses de
+    anos distintos sem cair no produto cartesiano de anos × meses."""
+    valores: list[int] = []
+    for p in periodos or []:
+        try:
+            ano_str, mes_str = str(p).split("-")
+            valores.append(int(ano_str) * 100 + int(mes_str))
+        except (ValueError, AttributeError):
+            continue
+    if not valores:
+        return None
+    col_ref = f"{alias}.{column}" if alias else column
+    placeholders = ", ".join(["?"] * len(valores))
+    params.extend(valores)
+    return f"(YEAR({col_ref}) * 100 + MONTH({col_ref})) IN ({placeholders})"
+
+
 def _split_int_filter(value: int | str | list | tuple | None) -> list[int]:
     if value is None:
         return []
@@ -547,6 +566,7 @@ def _normalize_filtros(filtros: dict | None) -> dict:
         "tiposReceita": _split_filter(filtros.get("tiposReceita") or filtros.get("tipoReceita")),
         "dataInicio": filtros.get("dataInicio"),
         "dataFim": filtros.get("dataFim"),
+        "periodos": _split_filter(filtros.get("periodos")),
         "codParc": filtros.get("codParc"),
         "codProduto": filtros.get("codProduto"),
         "codParcs": _split_int_filter(filtros.get("codParcs") or filtros.get("codParc")),
@@ -577,12 +597,16 @@ def build_fato_vendas_where(filtros: dict | None, alias: str = "fv") -> tuple[st
     if clause:
         parts.append(clause)
 
-    if f["dataInicio"]:
-        parts.append(f"{alias}.dt_entrega_cliente >= ?")
-        params.append(f["dataInicio"])
-    if f["dataFim"]:
-        parts.append(f"{alias}.dt_entrega_cliente <= ?")
-        params.append(f["dataFim"])
+    periodos_clause = _build_periodos_clause(alias, "dt_entrega_cliente", f["periodos"], params)
+    if periodos_clause:
+        parts.append(periodos_clause)
+    else:
+        if f["dataInicio"]:
+            parts.append(f"{alias}.dt_entrega_cliente >= ?")
+            params.append(f["dataInicio"])
+        if f["dataFim"]:
+            parts.append(f"{alias}.dt_entrega_cliente <= ?")
+            params.append(f["dataFim"])
     clause = _build_in_clause(f"{alias}.cod_parc", f["codParcs"], params)
     if clause:
         parts.append(clause)
@@ -604,12 +628,16 @@ def build_orcamento_where(filtros: dict | None) -> tuple[str, list[Any]]:
     parts: list[str] = []
     params: list[Any] = []
 
-    if f["dataInicio"]:
-        parts.append("dt_prev_entrega_embarque >= ?")
-        params.append(f["dataInicio"])
-    if f["dataFim"]:
-        parts.append("dt_prev_entrega_embarque <= ?")
-        params.append(f["dataFim"])
+    periodos_clause = _build_periodos_clause("", "dt_prev_entrega_embarque", f["periodos"], params)
+    if periodos_clause:
+        parts.append(periodos_clause)
+    else:
+        if f["dataInicio"]:
+            parts.append("dt_prev_entrega_embarque >= ?")
+            params.append(f["dataInicio"])
+        if f["dataFim"]:
+            parts.append("dt_prev_entrega_embarque <= ?")
+            params.append(f["dataFim"])
 
     for column, values in [
         ("projeto", f["projetos"]),
@@ -1157,6 +1185,7 @@ def _dash_normalize_filtros(filtros: dict | None) -> dict:
         "tiposReceita": _dash_split_filter(filtros.get("tiposReceita") or filtros.get("tipoReceita")),
         "dataInicio": filtros.get("dataInicio"),
         "dataFim": filtros.get("dataFim"),
+        "periodos": _dash_split_filter(filtros.get("periodos")),
         "codParc": filtros.get("codParc"),
         "codProduto": filtros.get("codProduto"),
         "codParcs": _split_int_filter(filtros.get("codParcs") or filtros.get("codParc")),
@@ -1188,12 +1217,16 @@ def _dash_build_fato_where(filtros: dict | None, alias: str = "fv", ignore_tipo_
         if clause:
             parts.append(clause)
 
-    if f["dataInicio"]:
-        parts.append(f"{alias}.dt_entrega_cliente >= ?")
-        params.append(f["dataInicio"])
-    if f["dataFim"]:
-        parts.append(f"{alias}.dt_entrega_cliente <= ?")
-        params.append(f["dataFim"])
+    periodos_clause = _build_periodos_clause(alias, "dt_entrega_cliente", f["periodos"], params)
+    if periodos_clause:
+        parts.append(periodos_clause)
+    else:
+        if f["dataInicio"]:
+            parts.append(f"{alias}.dt_entrega_cliente >= ?")
+            params.append(f["dataInicio"])
+        if f["dataFim"]:
+            parts.append(f"{alias}.dt_entrega_cliente <= ?")
+            params.append(f["dataFim"])
     clause = _dash_build_in_clause(f"{alias}.cod_parc", f["codParcs"], params)
     if clause:
         parts.append(clause)
@@ -1215,12 +1248,16 @@ def _dash_build_orcamento_where(filtros: dict | None) -> tuple[str, list[Any]]:
     parts: list[str] = []
     params: list[Any] = []
 
-    if f["dataInicio"]:
-        parts.append("dt_prev_entrega_embarque >= ?")
-        params.append(f["dataInicio"])
-    if f["dataFim"]:
-        parts.append("dt_prev_entrega_embarque <= ?")
-        params.append(f["dataFim"])
+    periodos_clause = _build_periodos_clause("", "dt_prev_entrega_embarque", f["periodos"], params)
+    if periodos_clause:
+        parts.append(periodos_clause)
+    else:
+        if f["dataInicio"]:
+            parts.append("dt_prev_entrega_embarque >= ?")
+            params.append(f["dataInicio"])
+        if f["dataFim"]:
+            parts.append("dt_prev_entrega_embarque <= ?")
+            params.append(f["dataFim"])
 
     for column, values in [
         ("projeto", f["projetos"]),
@@ -1735,6 +1772,7 @@ def _np_normalize_filtros(filtros: dict | None) -> dict:
         "tiposReceita": _np_split_filter(filtros.get("tiposReceita") or filtros.get("tipoReceita")),
         "dataInicio": filtros.get("dataInicio"),
         "dataFim": filtros.get("dataFim"),
+        "periodos": _np_split_filter(filtros.get("periodos")),
         "codParc": filtros.get("codParc"),
         "codProduto": filtros.get("codProduto"),
         "codParcs": _split_int_filter(filtros.get("codParcs") or filtros.get("codParc")),
@@ -1764,12 +1802,17 @@ def _np_build_fato_where(filtros: dict | None, alias: str = "fv", include_date: 
     if clause:
         parts.append(clause)
 
-    if include_date and f["dataInicio"]:
-        parts.append(f"{alias}.dt_entrega_cliente >= ?")
-        params.append(f["dataInicio"])
-    if include_date and f["dataFim"]:
-        parts.append(f"{alias}.dt_entrega_cliente <= ?")
-        params.append(f["dataFim"])
+    if include_date:
+        periodos_clause = _build_periodos_clause(alias, "dt_entrega_cliente", f["periodos"], params)
+        if periodos_clause:
+            parts.append(periodos_clause)
+        else:
+            if f["dataInicio"]:
+                parts.append(f"{alias}.dt_entrega_cliente >= ?")
+                params.append(f["dataInicio"])
+            if f["dataFim"]:
+                parts.append(f"{alias}.dt_entrega_cliente <= ?")
+                params.append(f["dataFim"])
     clause = _np_build_in_clause(f"{alias}.cod_parc", f["codParcs"], params)
     if clause:
         parts.append(clause)
@@ -2203,6 +2246,8 @@ def _hc_normalize_filtros(filtros: dict | None = None) -> dict:
         "vendedores": _hc_str_list(filtros.get("vendedores")),
         "ufs": _hc_str_list(filtros.get("ufs")),
         "codProdutos": _hc_str_list(filtros.get("codProdutos")),
+        "projetos": _hc_str_list(filtros.get("projetos") or filtros.get("projeto")),
+        "periodos": _hc_str_list(filtros.get("periodos")),
     }
 
 
@@ -2224,22 +2269,27 @@ def _hc_build_where(filtros: dict | None = None, alias: str = "fv") -> tuple[str
     ]
     params: list = []
 
-    if f["dataInicio"] or f["dataFim"]:
-        if f["dataInicio"]:
-            parts.append(f"{alias}.dt_entrega_cliente >= ?")
-            params.append(f["dataInicio"])
-        if f["dataFim"]:
-            parts.append(f"{alias}.dt_entrega_cliente <= ?")
-            params.append(f["dataFim"])
+    periodos_clause = _build_periodos_clause(alias, "dt_entrega_cliente", f["periodos"], params)
+    if periodos_clause:
+        parts.append(periodos_clause)
     else:
-        _hc_add_in_clause(parts, params, f"YEAR({alias}.dt_entrega_cliente)", f["anos"])
-    _hc_add_in_clause(parts, params, f"MONTH({alias}.dt_entrega_cliente)", f["meses"])
+        if f["dataInicio"] or f["dataFim"]:
+            if f["dataInicio"]:
+                parts.append(f"{alias}.dt_entrega_cliente >= ?")
+                params.append(f["dataInicio"])
+            if f["dataFim"]:
+                parts.append(f"{alias}.dt_entrega_cliente <= ?")
+                params.append(f["dataFim"])
+        else:
+            _hc_add_in_clause(parts, params, f"YEAR({alias}.dt_entrega_cliente)", f["anos"])
+        _hc_add_in_clause(parts, params, f"MONTH({alias}.dt_entrega_cliente)", f["meses"])
     _hc_add_in_clause(parts, params, f"{alias}.cod_parc", f["codParcs"])
     _hc_add_in_clause(parts, params, f"{alias}.mercado_vendas", f["mercados"])
     _hc_add_in_clause(parts, params, f"{alias}.grupo_produto", f["gruposProduto"])
     _hc_add_in_clause(parts, params, f"{alias}.nome_vendedor", f["vendedores"])
     _hc_add_in_clause(parts, params, f"{alias}.uf", f["ufs"])
     _hc_add_in_clause(parts, params, f"CAST({alias}.cod_produto AS NVARCHAR(50))", f["codProdutos"])
+    _hc_add_in_clause(parts, params, f"{alias}.projeto", f["projetos"])
 
     return "WHERE " + " AND ".join(parts), tuple(params)
 
@@ -2351,6 +2401,8 @@ def get_historico_clientes_kpis(filtros: dict | None = None) -> dict:
         "mercados": f["mercados"],
         "gruposProduto": f["gruposProduto"],
         "vendedores": f["vendedores"],
+        "projetos": f["projetos"],
+        "periodos": f["periodos"],
     }
     base_clause, base_params = _hc_build_where(base_filtros)
 
@@ -2410,7 +2462,8 @@ def list_historico_clientes(filtros: dict | None = None) -> list[dict]:
             CASE WHEN COALESCE(SUM(fv.qtd_pendente_kg), 0) > 0
                 THEN SUM(fv.valor_pendente) / SUM(fv.qtd_pendente_kg)
                 ELSE 0 END AS precoMedio,
-            COUNT(DISTINCT fv.cod_produto) AS qtdProdutos
+            COUNT(DISTINCT fv.cod_produto) AS qtdProdutos,
+            MAX(fv.dt_entrega_cliente) AS ultimaCompra
         FROM fato_vendas fv
         LEFT JOIN dim_cliente dc ON fv.cod_parc = dc.cod_parc
         {clause}
@@ -2431,6 +2484,7 @@ def list_historico_clientes(filtros: dict | None = None) -> list[dict]:
             "qtdProdutos": _hc_int(r.get("qtdProdutos")),
             "pctValor": (_hc_number(r.get("valor")) / total_valor * 100) if total_valor > 0 else 0,
             "pctVolume": (_hc_number(r.get("volume")) / total_volume * 100) if total_volume > 0 else 0,
+            "ultimaCompra": _hc_iso(r.get("ultimaCompra")),
         }
         for r in rows
     ]
@@ -2608,12 +2662,16 @@ def _build_snapshot_hist_where(filtros: dict | None, alias: str = "fs") -> tuple
     parts: list[str] = []
     params: list[Any] = []
 
-    if f["dataInicio"]:
-        parts.append(f"{alias}.dt_entrega_cliente >= ?")
-        params.append(f["dataInicio"])
-    if f["dataFim"]:
-        parts.append(f"{alias}.dt_entrega_cliente <= ?")
-        params.append(f["dataFim"])
+    periodos_clause = _build_periodos_clause(alias, "dt_entrega_cliente", f["periodos"], params)
+    if periodos_clause:
+        parts.append(periodos_clause)
+    else:
+        if f["dataInicio"]:
+            parts.append(f"{alias}.dt_entrega_cliente >= ?")
+            params.append(f["dataInicio"])
+        if f["dataFim"]:
+            parts.append(f"{alias}.dt_entrega_cliente <= ?")
+            params.append(f["dataFim"])
 
     for clause in [
         _build_in_clause(f"{alias}.mercado_vendas", f["mercados"], params),
@@ -2889,12 +2947,16 @@ def _build_recorrentes_real_where(filtros: dict | None, alias: str = "fv") -> tu
     ]
     params: list[Any] = []
 
-    if f["dataInicio"]:
-        parts.append(f"{alias}.dt_entrega_cliente >= ?")
-        params.append(f["dataInicio"])
-    if f["dataFim"]:
-        parts.append(f"{alias}.dt_entrega_cliente <= ?")
-        params.append(f["dataFim"])
+    periodos_clause = _build_periodos_clause(alias, "dt_entrega_cliente", f["periodos"], params)
+    if periodos_clause:
+        parts.append(periodos_clause)
+    else:
+        if f["dataInicio"]:
+            parts.append(f"{alias}.dt_entrega_cliente >= ?")
+            params.append(f["dataInicio"])
+        if f["dataFim"]:
+            parts.append(f"{alias}.dt_entrega_cliente <= ?")
+            params.append(f["dataFim"])
     if f["mercados"]:
         placeholders = ", ".join("?" for _ in f["mercados"])
         parts.append(f"{alias}.mercado_vendas IN ({placeholders})")
@@ -2921,12 +2983,16 @@ def _build_recorrentes_orcamento_where(filtros: dict | None, alias: str = "o") -
     parts: list[str] = [f"{alias}.projeto = 'RECORRENTES'"]
     params: list[Any] = []
 
-    if f["dataInicio"]:
-        parts.append(f"{alias}.dt_prev_entrega_embarque >= ?")
-        params.append(f["dataInicio"])
-    if f["dataFim"]:
-        parts.append(f"{alias}.dt_prev_entrega_embarque <= ?")
-        params.append(f["dataFim"])
+    periodos_clause = _build_periodos_clause(alias, "dt_prev_entrega_embarque", f["periodos"], params)
+    if periodos_clause:
+        parts.append(periodos_clause)
+    else:
+        if f["dataInicio"]:
+            parts.append(f"{alias}.dt_prev_entrega_embarque >= ?")
+            params.append(f["dataInicio"])
+        if f["dataFim"]:
+            parts.append(f"{alias}.dt_prev_entrega_embarque <= ?")
+            params.append(f["dataFim"])
     if f["mercados"]:
         placeholders = ", ".join("?" for _ in f["mercados"])
         parts.append(f"{alias}.mercado_vendas IN ({placeholders})")
