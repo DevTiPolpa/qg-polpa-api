@@ -2662,6 +2662,11 @@ def _build_snapshot_hist_where(filtros: dict | None, alias: str = "fs") -> tuple
     parts: list[str] = []
     params: list[Any] = []
 
+    # DATEDIFF(DAY, 0, data) % 7 é independente de idioma/DATEFIRST: 1900-01-01 foi
+    # uma segunda-feira, então 0=segunda ... 2=quarta. So aceitamos snapshots de quarta,
+    # descartando qualquer resquicio de outros dias (ex.: sexta-feira do cron legado).
+    parts.append(f"DATEDIFF(DAY, 0, {alias}.snapshot_date) % 7 = 2")
+
     periodos_clause = _build_periodos_clause(alias, "dt_entrega_cliente", f["periodos"], params)
     if periodos_clause:
         parts.append(periodos_clause)
@@ -2711,6 +2716,7 @@ def get_snapshot_datas() -> list[dict]:
             CONVERT(VARCHAR(10), snapshot_date, 23) AS snapshotDate,
             COUNT(*) AS totalRows
         FROM dbo.forecast_snapshots
+        WHERE DATEDIFF(DAY, 0, snapshot_date) % 7 = 2
         GROUP BY CONVERT(VARCHAR(10), snapshot_date, 23)
         ORDER BY snapshotDate DESC
         """
