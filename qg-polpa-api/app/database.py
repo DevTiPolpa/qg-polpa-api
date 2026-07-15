@@ -2248,6 +2248,7 @@ def _hc_normalize_filtros(filtros: dict | None = None) -> dict:
         "codProdutos": _hc_str_list(filtros.get("codProdutos")),
         "projetos": _hc_str_list(filtros.get("projetos") or filtros.get("projeto")),
         "periodos": _hc_str_list(filtros.get("periodos")),
+        "perfis": _hc_str_list(filtros.get("perfis")),
     }
 
 
@@ -2290,6 +2291,7 @@ def _hc_build_where(filtros: dict | None = None, alias: str = "fv") -> tuple[str
     _hc_add_in_clause(parts, params, f"{alias}.uf", f["ufs"])
     _hc_add_in_clause(parts, params, f"CAST({alias}.cod_produto AS NVARCHAR(50))", f["codProdutos"])
     _hc_add_in_clause(parts, params, f"{alias}.projeto", f["projetos"])
+    _hc_add_in_clause(parts, params, f"{alias}.perfil_parceiro", f["perfis"])
 
     return "WHERE " + " AND ".join(parts), tuple(params)
 
@@ -2567,6 +2569,34 @@ def list_historico_clientes_por_segmento(filtros: dict | None = None) -> list[di
     return [
         {
             "segmento": r.get("segmento"),
+            "valor": _hc_number(r.get("valor")),
+            "volume": _hc_number(r.get("volume")),
+            "pct": (_hc_number(r.get("valor")) / total * 100) if total > 0 else 0,
+        }
+        for r in filtered
+    ]
+
+
+def list_historico_clientes_por_perfil(filtros: dict | None = None) -> list[dict]:
+    clause, params = _hc_build_where(filtros)
+    rows = fetch_all(
+        f"""
+        SELECT
+            fv.perfil_parceiro AS perfil,
+            COALESCE(SUM(fv.valor_pendente), 0) AS valor,
+            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volume
+        FROM fato_vendas fv
+        {clause}
+        GROUP BY fv.perfil_parceiro
+        ORDER BY valor DESC
+        """,
+        params,
+    )
+    filtered = [r for r in rows if r.get("perfil")]
+    total = sum(_hc_number(r.get("valor")) for r in filtered)
+    return [
+        {
+            "perfil": r.get("perfil"),
             "valor": _hc_number(r.get("valor")),
             "volume": _hc_number(r.get("volume")),
             "pct": (_hc_number(r.get("valor")) / total * 100) if total > 0 else 0,
