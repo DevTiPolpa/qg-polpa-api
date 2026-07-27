@@ -1961,6 +1961,31 @@ def api_funil_vendas_evolucao_mensal(
 
 
 # =============================================================================
+# Placar Funil Comercial — endpoints REST
+# Exige só sessão autenticada (admin ou vendedor) — sem checagem de role.
+# =============================================================================
+
+from app.database import get_funil_scorecard
+
+_FUNIL_SCORECARD_RECORTES_VALIDOS = ("semana_atual", "semana_anterior", "mes_atual", "mes_anterior")
+
+
+def _require_authenticated(request: Request) -> dict:
+    user = get_current_user_from_request(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Não autenticado")
+    return user
+
+
+@app.get("/api/funil-scorecard/dashboard", tags=["Placar Funil Comercial"])
+def api_funil_scorecard_dashboard(request: Request, recorte: str = "semana_anterior"):
+    _require_authenticated(request)
+    if recorte not in _FUNIL_SCORECARD_RECORTES_VALIDOS:
+        raise HTTPException(status_code=400, detail="Recorte inválido")
+    return get_funil_scorecard(recorte)
+
+
+# =============================================================================
 # Panorama CRM — endpoints REST
 # =============================================================================
 

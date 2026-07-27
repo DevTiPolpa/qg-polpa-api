@@ -7,7 +7,7 @@ original REST e Dashboard Executivo original REST.
 """
 
 import os
-from datetime import datetime
+from datetime import datetime, timedelta, timezone, date
 from decimal import Decimal
 from typing import Any
 
@@ -4608,4 +4608,574 @@ def execute_agent_sql(query: str, max_rows: int = 200) -> dict:
         "row_count": len(rows),
         "limited": limited,
         "limit": safe_max_rows,
+    }
+
+
+# =============================================================================
+# Placar Funil Comercial — CRM (crm_deals / crm_deal_stage_history / crm_activities)
+# =============================================================================
+# Fonte da verdade das regras/números: SPEC_BACKEND.md (validado contra Bitrix24 e produção).
+
+FUNIL_SCORECARD_VENDEDORES = [
+    {"id": 151, "nome": "Julia Alberti"},
+    {"id": 289, "nome": "Talia Stefani Scain"},
+    {"id": 365, "nome": "Jennifer Anacleto"},
+    {"id": 397, "nome": "Tatiana Evangelista"},
+]
+FUNIL_SCORECARD_USER_IDS = (151, 289, 365, 397)
+
+# SLA por fase (dias), Perfil A = opportunity < 150 mil, Perfil B = >= 150 mil
+FUNIL_SCORECARD_SLA = {
+    "Qualificacao": {"A": 10, "B": 15},
+    "Proposta e Amostra": {"A": 20, "B": 20},
+    "Avaliacao no Cliente": {"A": 60, "B": 90},
+    "Homologacao e Teste Industrial": {"A": 60, "B": 120},
+    "Fechamento": {"A": 10, "B": 15},
+}
+
+_SC_MESES_ABREV = ["jan", "fev", "mar", "abr", "mai", "jun", "jul", "ago", "set", "out", "nov", "dez"]
+_SC_MESES_NOME = [
+    "Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho",
+    "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro",
+]
+
+
+def _sc_sort_case_sql(col: str) -> str:
+    """Posição de cada etapa no funil (só pra saber se um negócio "avançou")."""
+    return (
+        f"CASE {col} "
+        "WHEN 'UC_IJG2LW' THEN 10 "
+        "WHEN 'NEW' THEN 20 "
+        "WHEN 'UC_RWSOLQ' THEN 45 "
+        "WHEN 'UC_XFS4CF' THEN 50 "
+        "WHEN 'UC_1VRZTH' THEN 60 "
+        "WHEN '7' THEN 70 "
+        "WHEN 'UC_M8BBII' THEN 85 "
+        "WHEN '1' THEN 90 "
+        "WHEN 'WON' THEN 100 "
+        "WHEN 'LOSE' THEN 110 "
+        "WHEN '3' THEN 120 "
+        "WHEN '8' THEN 130 "
+        "ELSE NULL END"
+    )
+
+
+def _sc_fase_case_sql(col: str) -> str:
+    """Agrupa os stage_id do Bitrix nos 5 buckets de fase usados pro SLA."""
+    return (
+        f"CASE {col} "
+        "WHEN 'UC_IJG2LW' THEN 'Qualificacao' "
+        "WHEN 'NEW' THEN 'Proposta e Amostra' "
+        "WHEN 'UC_XFS4CF' THEN 'Avaliacao no Cliente' "
+        "WHEN 'UC_RWSOLQ' THEN 'Avaliacao no Cliente' "
+        "WHEN 'UC_1VRZTH' THEN 'Homologacao e Teste Industrial' "
+        "WHEN '7' THEN 'Homologacao e Teste Industrial' "
+        "WHEN '1' THEN 'Fechamento' "
+        "WHEN 'UC_M8BBII' THEN 'Fechamento' "
+        "ELSE 'SEM_MAPEAMENTO' END"
+    )
+
+
+def _sc_fuso_sql(col: str) -> str:
+    """Converte um nvarchar ISO com offset do Bitrix (+03:00) pra data no fuso do Brasil (-03:00).
+
+    TRY_CONVERT em vez de CONVERT: uma string malformada isolada vira NULL (exclui a linha das
+    comparações) em vez de derrubar a query inteira.
+    """
+    return f"CAST(SWITCHOFFSET(TRY_CONVERT(datetimeoffset(0), {col}), '-03:00') AS date)"
+
+
+def _sc_agora_brasil() -> date:
+    return (datetime.now(timezone.utc) - timedelta(hours=3)).date()
+
+
+def _sc_add_months(d: date, months: int) -> date:
+    total = d.year * 12 + (d.month - 1) + months
+    year, month = divmod(total, 12)
+    return date(year, month + 1, 1)
+
+
+def _sc_label_semana(start, end) -> str:
+    fim_incl = end - timedelta(days=1)
+    return f"{start.strftime('%d/%m')} a {fim_incl.strftime('%d/%m')}"
+
+
+def _sc_label_mes(start) -> str:
+    return f"{_SC_MESES_NOME[start.month - 1]}/{start.year}"
+
+
+def get_funil_scorecard_periodos(hoje: date | None = None) -> dict:
+    hoje = hoje or _sc_agora_brasil()
+    segunda = hoje - timedelta(days=hoje.weekday())  # date.weekday(): 0=segunda, já ISO
+
+    sa_start, sa_end = segunda, segunda + timedelta(days=7)
+    sant_start, sant_end = segunda - timedelta(days=7), segunda
+    sret_start, sret_end = segunda - timedelta(days=14), segunda - timedelta(days=7)
+
+    mes_ini = date(hoje.year, hoje.month, 1)
+    ma_start, ma_end = mes_ini, _sc_add_months(mes_ini, 1)
+    mant_start, mant_end = _sc_add_months(mes_ini, -1), mes_ini
+
+    quarter_start_month = ((hoje.month - 1) // 3) * 3 + 1
+    tri_inicio = date(hoje.year, quarter_start_month, 1)
+    tri_fim = _sc_add_months(tri_inicio, 3)
+    tri_meses = [f"{hoje.year}-{(quarter_start_month + i):02d}" for i in range(3)]
+    quarter_num = (quarter_start_month - 1) // 3 + 1
+    tri_label = (
+        f"T{quarter_num}/{hoje.year} "
+        f"({_SC_MESES_ABREV[quarter_start_month - 1]}-{_SC_MESES_ABREV[quarter_start_month + 1]})"
+    )
+
+    return {
+        "semana_atual": {"start": sa_start.isoformat(), "end": sa_end.isoformat(), "label": _sc_label_semana(sa_start, sa_end)},
+        "semana_anterior": {"start": sant_start.isoformat(), "end": sant_end.isoformat(), "label": _sc_label_semana(sant_start, sant_end)},
+        "semana_retrasada": {"start": sret_start.isoformat(), "end": sret_end.isoformat(), "label": _sc_label_semana(sret_start, sret_end)},
+        "mes_atual": {"start": ma_start.isoformat(), "end": ma_end.isoformat(), "label": _sc_label_mes(ma_start)},
+        "mes_anterior": {"start": mant_start.isoformat(), "end": mant_end.isoformat(), "label": _sc_label_mes(mant_start)},
+        "ano": hoje.year,
+        "trimestre": {"label": tri_label, "meses": tri_meses, "inicio": tri_inicio.isoformat(), "fim": tri_fim.isoformat()},
+    }
+
+
+_SC_COD_TOP_FILTER = "(cod_top IS NULL OR cod_top <> 1023) AND ([top] IS NULL OR [top] NOT LIKE '%ESTOQUE MINIM%')"
+
+
+def get_funil_scorecard_resultado(ano: int, meses_trimestre: list[str], inicio_tri: str, fim_tri: str) -> dict:
+    meta_ano_rows = fetch_all("SELECT COALESCE(SUM(valor_meta), 0) AS v FROM dbo.metas_2026")
+    meta_ano = _number(meta_ano_rows[0]["v"]) if meta_ano_rows else 0.0
+
+    placeholders = ",".join("?" for _ in meses_trimestre)
+    meta_tri_rows = fetch_all(
+        f"SELECT COALESCE(SUM(valor_meta), 0) AS v FROM dbo.metas_2026 WHERE mes IN ({placeholders})",
+        tuple(meses_trimestre),
+    )
+    meta_tri = _number(meta_tri_rows[0]["v"]) if meta_tri_rows else 0.0
+
+    real_ano_rows = fetch_all(
+        f"""
+        SELECT COALESCE(SUM(valor_pendente), 0) AS v
+        FROM dbo.fato_vendas
+        WHERE YEAR(dt_entrega_cliente) = ?
+          AND tipo_receita IN ('VENDA_FIRME', 'FORECAST', 'DEVOLUCAO')
+          AND {_SC_COD_TOP_FILTER}
+        """,
+        (ano,),
+    )
+    realizado_ano = _number(real_ano_rows[0]["v"]) if real_ano_rows else 0.0
+
+    real_tri_rows = fetch_all(
+        f"""
+        SELECT COALESCE(SUM(valor_pendente), 0) AS v
+        FROM dbo.fato_vendas
+        WHERE dt_entrega_cliente >= ? AND dt_entrega_cliente < ?
+          AND tipo_receita IN ('VENDA_FIRME', 'FORECAST', 'DEVOLUCAO')
+          AND {_SC_COD_TOP_FILTER}
+        """,
+        (inicio_tri, fim_tri),
+    )
+    realizado_tri = _number(real_tri_rows[0]["v"]) if real_tri_rows else 0.0
+
+    return {
+        "metaAno": meta_ano, "realizadoAno": realizado_ano,
+        "metaTri": meta_tri, "realizadoTri": realizado_tri,
+    }
+
+
+def get_funil_scorecard_cadencia_range(start: str, end: str) -> list[dict]:
+    ids_placeholders = ",".join("?" for _ in FUNIL_SCORECARD_USER_IDS)
+    fuso_create = _sc_fuso_sql("d.date_create")
+    fuso_close = _sc_fuso_sql("d.closedate")
+
+    contagens = fetch_all(
+        f"""
+        SELECT d.assigned_by_id AS userId,
+          SUM(CASE WHEN {fuso_create} >= ? AND {fuso_create} < ? THEN 1 ELSE 0 END) AS abertos,
+          SUM(CASE WHEN d.stage_semantic_id = 'S' AND {fuso_close} >= ? AND {fuso_close} < ? THEN 1 ELSE 0 END) AS ganhos,
+          SUM(CASE WHEN d.stage_id IN ('LOSE','3','8') AND {fuso_close} >= ? AND {fuso_close} < ? THEN 1 ELSE 0 END) AS perdidos
+        FROM dbo.crm_deals d
+        WHERE d.assigned_by_id IN ({ids_placeholders})
+          AND (d.category_id = '0' OR d.category_id IS NULL)
+        GROUP BY d.assigned_by_id
+        """,
+        (start, end, start, end, start, end) + FUNIL_SCORECARD_USER_IDS,
+    )
+
+    sort_case = _sc_sort_case_sql("h.stage_id")
+    fuso_hist = _sc_fuso_sql("created_time")
+    avancados = fetch_all(
+        f"""
+        WITH hist AS (
+            SELECT h.deal_id, d.assigned_by_id, h.created_time,
+                   {sort_case} AS sort_atual,
+                   LAG({sort_case}) OVER (PARTITION BY h.deal_id ORDER BY h.created_time) AS sort_anterior
+            FROM dbo.crm_deal_stage_history h
+            JOIN dbo.crm_deals d ON d.id = h.deal_id
+            WHERE d.assigned_by_id IN ({ids_placeholders})
+              AND (d.category_id = '0' OR d.category_id IS NULL)
+        )
+        SELECT assigned_by_id AS userId, COUNT(DISTINCT deal_id) AS avancaram
+        FROM hist
+        WHERE {fuso_hist} >= ? AND {fuso_hist} < ?
+          AND sort_anterior IS NOT NULL AND sort_atual > sort_anterior
+        GROUP BY assigned_by_id
+        """,
+        FUNIL_SCORECARD_USER_IDS + (start, end),
+    )
+
+    por_vendedor: dict[int, dict] = {
+        uid: {"userId": uid, "abertos": 0, "ganhos": 0, "perdidos": 0, "avancaram": 0}
+        for uid in FUNIL_SCORECARD_USER_IDS
+    }
+    for row in contagens:
+        uid = _int(row.get("userId"))
+        if uid in por_vendedor:
+            por_vendedor[uid]["abertos"] = _int(row.get("abertos"))
+            por_vendedor[uid]["ganhos"] = _int(row.get("ganhos"))
+            por_vendedor[uid]["perdidos"] = _int(row.get("perdidos"))
+    for row in avancados:
+        uid = _int(row.get("userId"))
+        if uid in por_vendedor:
+            por_vendedor[uid]["avancaram"] = _int(row.get("avancaram"))
+
+    for v in por_vendedor.values():
+        v["saldo"] = v["abertos"] - (v["ganhos"] + v["perdidos"])
+
+    return list(por_vendedor.values())
+
+
+def get_funil_scorecard_saude_raw() -> list[dict]:
+    fase_case = _sc_fase_case_sql("d.stage_id")
+    entrada_fuso = _sc_fuso_sql("COALESCE(ef.entrada, d.date_create)")
+    deadline_fuso = _sc_fuso_sql("deadline")
+
+    hoje_iso = _sc_agora_brasil().isoformat()
+
+    rows = fetch_all(
+        f"""
+        WITH entrada_fase AS (
+            SELECT h.deal_id, MAX(h.created_time) AS entrada
+            FROM dbo.crm_deal_stage_history h
+            JOIN dbo.crm_deals d ON d.id = h.deal_id AND d.stage_id = h.stage_id
+            GROUP BY h.deal_id
+        ), followup AS (
+            SELECT DISTINCT owner_id
+            FROM dbo.crm_activities
+            WHERE owner_type_id = 2
+              AND deadline NOT LIKE '9999%'
+              AND (provider_id = 'CRM_TODO' OR (provider_id = 'CRM_TASKS_TASK' AND completed = 0))
+              AND {deadline_fuso} >= ?
+        )
+        SELECT d.id AS id, d.title AS title, d.assigned_by_id AS assignedById,
+               {fase_case} AS fase, d.opportunity AS opportunity,
+               {entrada_fuso} AS entradaFase,
+               CASE WHEN f.owner_id IS NULL THEN 0 ELSE 1 END AS temFollowup
+        FROM dbo.crm_deals d
+        LEFT JOIN entrada_fase ef ON ef.deal_id = d.id
+        LEFT JOIN followup f ON f.owner_id = d.id
+        WHERE (d.category_id = '0' OR d.category_id IS NULL)
+          AND d.stage_semantic_id = 'P'
+          AND d.stage_id NOT IN ('8', 'UC_PNH69S')
+        """,
+        (hoje_iso,),
+    )
+    return [
+        {
+            "id": _int(row.get("id")),
+            "title": row.get("title") or "",
+            "assignedById": _int(row.get("assignedById")),
+            "fase": row.get("fase") or "SEM_MAPEAMENTO",
+            "opportunity": _number(row.get("opportunity")),
+            "entradaFase": row.get("entradaFase"),
+            "temFollowup": bool(row.get("temFollowup")),
+        }
+        for row in rows
+    ]
+
+
+def get_funil_scorecard_estagnado() -> int:
+    rows = fetch_all(
+        """
+        SELECT COUNT(*) AS v FROM dbo.crm_deals
+        WHERE (category_id = '0' OR category_id IS NULL) AND stage_id = 'UC_PNH69S'
+        """
+    )
+    return _int(rows[0]["v"]) if rows else 0
+
+
+# ─── Semáforos e veredito (lógica pura, sem I/O) ───────────────────────────────
+
+def _sc_cor_abertos(n: int, escopo: str) -> str:
+    if escopo == "semana":
+        if n >= 5:
+            return "verde"
+        return "amarelo" if n >= 3 else "vermelho"
+    if n >= 22:
+        return "verde"
+    return "amarelo" if n >= 15 else "vermelho"
+
+
+def _sc_cor_ganhos(atual: int, ref_retrasada: int, escopo: str) -> str:
+    if escopo == "semana":
+        if atual >= 1:
+            return "verde"
+        return "amarelo" if ref_retrasada >= 1 else "vermelho"
+    if atual >= 5:
+        return "verde"
+    return "amarelo" if atual >= 3 else "vermelho"
+
+
+def _sc_cor_saldo(n: int, escopo: str) -> str:
+    if escopo == "semana":
+        if n > 0:
+            return "verde"
+        return "amarelo" if n == 0 else "vermelho"
+    if n >= 5:
+        return "verde"
+    return "amarelo" if n >= 1 else "vermelho"
+
+
+def _sc_cor_taxa_perda(pct: float, escopo: str) -> str:
+    if escopo == "semana":
+        if pct < 3:
+            return "verde"
+        return "amarelo" if pct <= 6 else "vermelho"
+    if pct < 5:
+        return "verde"
+    return "amarelo" if pct <= 12 else "vermelho"
+
+
+def _sc_cor_pct_saude(pct: float | None, tipo: str) -> str | None:
+    if pct is None:
+        return None
+    if tipo == "sla":
+        if pct < 30:
+            return "verde"
+        return "amarelo" if pct <= 50 else "vermelho"
+    if pct < 30:
+        return "verde"
+    return "amarelo" if pct <= 60 else "vermelho"
+
+
+def _sc_cor_pct_atingido(pct: float) -> str:
+    if pct >= 100:
+        return "verde"
+    return "amarelo" if pct >= 85 else "vermelho"
+
+
+def _sc_gerar_veredito(luzes: dict, saude_agregada: dict, numeros: dict) -> str:
+    abertos_cor = luzes["abertos"]
+    ganhos_cor = luzes["ganhos"]
+    saldo_cor = luzes["saldo"]
+    taxa_perda_cor = luzes["perdidos"]
+    pct_sla_cor = saude_agregada.get("corSla")
+    pct_fu_cor = saude_agregada.get("corFu")
+
+    cadencia_toda_verde = abertos_cor == "verde" and ganhos_cor == "verde" and saldo_cor == "verde"
+    cadencia_toda_vermelha = abertos_cor == "vermelho" and ganhos_cor == "vermelho" and saldo_cor == "vermelho"
+    saude_tem_vermelho = pct_sla_cor == "vermelho" or pct_fu_cor == "vermelho"
+    saude_toda_verde = pct_sla_cor == "verde" and pct_fu_cor == "verde"
+
+    abertos = numeros["abertos"]
+    ganhos = numeros["ganhos"]
+    perdidos = numeros["perdidos"]
+    saldo = numeros["saldo"]
+    taxa_perda = numeros["taxaPerda"]
+    pct_sla = saude_agregada["pctSlaAgregado"]
+    pct_fu = saude_agregada["pctFuAgregado"]
+
+    if cadencia_toda_verde and saude_tem_vermelho:
+        return (
+            f"Motor de entrada girando bem ({abertos} abertos, {ganhos} ganhos, saldo {saldo:+d}) "
+            f"— mas o problema não é o topo do funil, é o meio: {pct_sla:.0f}% fora do SLA e "
+            f"{pct_fu:.0f}% sem follow-up agendado."
+        )
+
+    if saldo_cor == "vermelho" and taxa_perda_cor in ("amarelo", "vermelho"):
+        texto = (
+            f"A máquina gira devagar e vaza: {perdidos} perdidos (taxa de {taxa_perda:.1f}% do funil ativo) "
+            f"contra {ganhos} ganhos (saldo {saldo:+d}) — o problema principal é a saída, não a entrada ({abertos} abertos)."
+        )
+        if pct_fu_cor != "verde":
+            texto += f" O funil ativo também carrega {pct_fu:.0f}% sem follow-up, o que agrava o risco."
+        return texto
+
+    if abertos_cor == "vermelho":
+        return f"Geração de negócios fraca ({abertos} abertos) — saldo {saldo:+d}. Se não reagir, o funil começa a secar."
+
+    if ganhos_cor == "vermelho":
+        return f"Conversão fraca: só {ganhos} ganho(s) — poucos negócios fechando apesar do funil girar."
+
+    if cadencia_toda_verde and saude_toda_verde:
+        return "Tudo girando bem: cadência no alvo e funil saudável. Manter o ritmo."
+
+    if cadencia_toda_vermelha and saude_tem_vermelho:
+        return "Situação crítica: entrada fraca e funil travado ao mesmo tempo — atenção total."
+
+    return "Sinais mistos: sem crise clara, mas vale atenção pontual nos itens amarelos/vermelhos."
+
+
+# ─── Orquestrador ───────────────────────────────────────────────────────────────
+
+def get_funil_scorecard(recorte_selecionado: str) -> dict:
+    hoje = _sc_agora_brasil()
+    periodos = get_funil_scorecard_periodos(hoje)
+
+    resultado_raw = get_funil_scorecard_resultado(
+        periodos["ano"], periodos["trimestre"]["meses"],
+        periodos["trimestre"]["inicio"], periodos["trimestre"]["fim"],
+    )
+    pct_ano = (resultado_raw["realizadoAno"] / resultado_raw["metaAno"] * 100) if resultado_raw["metaAno"] else 0.0
+    pct_tri = (resultado_raw["realizadoTri"] / resultado_raw["metaTri"] * 100) if resultado_raw["metaTri"] else 0.0
+    resultado = {
+        "ano": periodos["ano"],
+        "metaAno": resultado_raw["metaAno"], "realizadoAno": resultado_raw["realizadoAno"], "pctAno": pct_ano,
+        "trimestreLabel": periodos["trimestre"]["label"],
+        "metaTri": resultado_raw["metaTri"], "realizadoTri": resultado_raw["realizadoTri"], "pctTri": pct_tri,
+    }
+
+    recortes_cadencia = ("semana_atual", "semana_anterior", "semana_retrasada", "mes_atual", "mes_anterior")
+    cadencia_raw = {
+        r: get_funil_scorecard_cadencia_range(periodos[r]["start"], periodos[r]["end"])
+        for r in recortes_cadencia
+    }
+
+    nomes_por_id = {v["id"]: v["nome"] for v in FUNIL_SCORECARD_VENDEDORES}
+
+    cadencia: dict[str, dict] = {}
+    for r in recortes_cadencia:
+        vendedores_linha = []
+        totais = {"abertos": 0, "ganhos": 0, "perdidos": 0, "avancaram": 0, "saldo": 0}
+        for row in cadencia_raw[r]:
+            linha = {
+                "nome": nomes_por_id.get(row["userId"], "?"),
+                "abertos": row["abertos"], "ganhos": row["ganhos"],
+                "perdidos": row["perdidos"], "avancaram": row["avancaram"], "saldo": row["saldo"],
+            }
+            vendedores_linha.append(linha)
+            for k in totais:
+                totais[k] += linha[k]
+        vendedores_linha.sort(key=lambda v: v["nome"])
+        cadencia[r] = {"label": periodos[r]["label"], "vendedores": vendedores_linha, "totais": totais}
+
+    saude_raw = get_funil_scorecard_saude_raw()
+    estagnado = get_funil_scorecard_estagnado()
+
+    def _dias_na_fase(entrada_fase) -> int:
+        if entrada_fase is None:
+            return 0
+        if isinstance(entrada_fase, datetime):
+            entrada_fase = entrada_fase.date()
+        elif isinstance(entrada_fase, str):
+            entrada_fase = datetime.fromisoformat(entrada_fase).date()
+        return max((hoje - entrada_fase).days, 0)
+
+    enriquecidos = []
+    for d in saude_raw:
+        dias = _dias_na_fase(d["entradaFase"])
+        perfil = "B" if d["opportunity"] >= 150000 else "A"
+        sla_fase = FUNIL_SCORECARD_SLA.get(d["fase"])
+        sla = sla_fase[perfil] if sla_fase else None
+        fora_do_sla = sla is not None and dias > sla
+        enriquecidos.append({**d, "diasNaFase": dias, "perfil": perfil, "sla": sla, "foraDoSla": fora_do_sla})
+
+    def _pct(parte: int, total: int) -> float | None:
+        return (parte / total * 100) if total else None
+
+    grupos = {v["id"]: {"nome": v["nome"], "ativos": 0, "foraSla": 0, "semFollowup": 0} for v in FUNIL_SCORECARD_VENDEDORES}
+    outros = {"nome": "Outros (fora do placar)", "ativos": 0, "foraSla": 0, "semFollowup": 0}
+    for d in enriquecidos:
+        alvo = grupos.get(d["assignedById"], outros)
+        alvo["ativos"] += 1
+        if d["foraDoSla"]:
+            alvo["foraSla"] += 1
+        if not d["temFollowup"]:
+            alvo["semFollowup"] += 1
+
+    saude_lista = []
+    total_ativos = total_fora_sla = total_sem_fu = 0
+    for v in FUNIL_SCORECARD_VENDEDORES:
+        g = grupos[v["id"]]
+        saude_lista.append({
+            "nome": g["nome"], "ativos": g["ativos"], "foraSla": g["foraSla"], "semFollowup": g["semFollowup"],
+            "pctSla": _pct(g["foraSla"], g["ativos"]), "pctFu": _pct(g["semFollowup"], g["ativos"]),
+        })
+        total_ativos += g["ativos"]; total_fora_sla += g["foraSla"]; total_sem_fu += g["semFollowup"]
+
+    # "Outros (fora do placar)" -- soma pro total bater
+    saude_lista.append({
+        "nome": outros["nome"], "ativos": outros["ativos"], "foraSla": outros["foraSla"],
+        "semFollowup": outros["semFollowup"],
+        "pctSla": _pct(outros["foraSla"], outros["ativos"]), "pctFu": _pct(outros["semFollowup"], outros["ativos"]),
+    })
+    total_ativos += outros["ativos"]; total_fora_sla += outros["foraSla"]; total_sem_fu += outros["semFollowup"]
+
+    pct_sla_agregado = _pct(total_fora_sla, total_ativos) or 0.0
+    pct_fu_agregado = _pct(total_sem_fu, total_ativos) or 0.0
+
+    acao_candidatos = [
+        d for d in enriquecidos
+        if d["assignedById"] in nomes_por_id and d["foraDoSla"] and not d["temFollowup"]
+    ]
+    acao_candidatos.sort(key=lambda d: d["diasNaFase"], reverse=True)
+    acao_total = len(acao_candidatos)
+    acao = [
+        {
+            "titulo": d["title"], "vendedor": nomes_por_id.get(d["assignedById"], "?"),
+            "fase": d["fase"], "dias": d["diasNaFase"], "sla": d["sla"],
+        }
+        for d in acao_candidatos[:20]
+    ]
+
+    if recorte_selecionado == "semana_atual":
+        luzes = None
+        t = cadencia["semana_atual"]["totais"]
+        veredito = (
+            f"Acompanhamento da semana em andamento (sem veredito de cobrança): "
+            f"{t['abertos']} abertos, {t['ganhos']} ganhos, {t['perdidos']} perdidos, saldo {t['saldo']:+d} até agora."
+        )
+    else:
+        escopo = "semana" if recorte_selecionado == "semana_anterior" else "mes"
+        t = cadencia[recorte_selecionado]["totais"]
+        ref_retrasada_ganhos = (
+            cadencia["semana_retrasada"]["totais"]["ganhos"] if recorte_selecionado == "semana_anterior" else 0
+        )
+        taxa_perda = _pct(t["perdidos"], total_ativos) or 0.0
+
+        cor_ganhos = _sc_cor_ganhos(t["ganhos"], ref_retrasada_ganhos, escopo)
+        if t["saldo"] < 0 and cor_ganhos == "verde":
+            cor_ganhos = "amarelo"
+
+        luzes = {
+            "abertos": _sc_cor_abertos(t["abertos"], escopo),
+            "ganhos": cor_ganhos,
+            "saldo": _sc_cor_saldo(t["saldo"], escopo),
+            "perdidos": _sc_cor_taxa_perda(taxa_perda, escopo),
+            "taxaPerda": taxa_perda,
+        }
+
+        veredito = _sc_gerar_veredito(
+            luzes,
+            {
+                "pctSlaAgregado": pct_sla_agregado, "pctFuAgregado": pct_fu_agregado,
+                "corSla": _sc_cor_pct_saude(pct_sla_agregado, "sla"),
+                "corFu": _sc_cor_pct_saude(pct_fu_agregado, "followup"),
+            },
+            {"abertos": t["abertos"], "ganhos": t["ganhos"], "perdidos": t["perdidos"], "saldo": t["saldo"], "taxaPerda": taxa_perda},
+        )
+
+    saude = {
+        "porVendedor": saude_lista,
+        "totalAtivos": total_ativos, "totalForaSla": total_fora_sla, "totalSemFollowup": total_sem_fu,
+        "pctSlaAgregado": pct_sla_agregado, "pctFuAgregado": pct_fu_agregado,
+        "estagnado": estagnado,
+    }
+
+    return {
+        "resultado": resultado,
+        "cadencia": cadencia,
+        "luzes": luzes,
+        "veredito": veredito,
+        "saude": saude,
+        "acao": acao,
+        "acaoTotal": acao_total,
     }
