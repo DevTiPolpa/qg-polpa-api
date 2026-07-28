@@ -1,6 +1,8 @@
 import os
+import re
 from datetime import datetime, timedelta, timezone
 import jwt
+import requests
 import secrets
 import bcrypt
 from fastapi import FastAPI, HTTPException, Request, Response
@@ -2409,3 +2411,189 @@ def api_chatbot_delete_session(session_id: str, request: Request):
 def api_chat_qg(payload: ChatQGRequest, request: Request):
     _validate_internal_chat_secret(request)
     return _chat_qg_generate_answer(payload.message.strip(), payload.history)
+
+
+# =============================================================================
+# Geração de Listas (CRM) — proxy REST para o serviço Python standalone já
+# pronto e calibrado (geracao-listas, porta 5090, não faz parte deste repo).
+# Este serviço concentra toda a lógica de deduplicação/classificação de
+# prospecção contra fato_vendas + CRM; aqui só autenticamos via cookie de
+# sessão (mesmo padrão do resto desta API), injetamos created_by do usuário
+# logado (nunca vem do client) e convertemos snake_case <-> camelCase.
+#
+# Nota de arquitetura: o brief original deste módulo assumia um gateway
+# Node/tRPC (qg-polpa-brasil/server) fazendo esse proxy. Esse papel já migrou
+# pra cá nesse projeto — o client React aponta VITE_API_BASE_URL pra esta API,
+# não pro Node — então é este serviço que faz o proxy, no mesmo padrão já
+# usado por /api/chatbot/* e /api/chat-qg acima.
+# =============================================================================
+
+GERACAO_LISTAS_API_URL = os.getenv("GERACAO_LISTAS_API_URL", "http://localhost:5090").rstrip("/")
+GERACAO_LISTAS_INTERNAL_SECRET = os.getenv("GERACAO_LISTAS_INTERNAL_SECRET", "")
+
+_CAMEL_BOUNDARY_RE = re.compile(r"(?<!^)(?=[A-Z])")
+
+
+def _require_authenticated_user(request: Request) -> dict:
+    user = get_current_user_from_request(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Não autenticado")
+    return user
+
+
+def _snake_to_camel(key: str) -> str:
+    head, *rest = key.split("_")
+    return head + "".join(part.title() for part in rest)
+
+
+def _camel_to_snake(key: str) -> str:
+    return _CAMEL_BOUNDARY_RE.sub("_", key).lower()
+
+
+def _camelize(obj):
+    if isinstance(obj, dict):
+        return {_snake_to_camel(k): _camelize(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_camelize(v) for v in obj]
+    return obj
+
+
+def _snakeify(obj):
+    if isinstance(obj, dict):
+        return {_camel_to_snake(k): _snakeify(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_snakeify(v) for v in obj]
+    return obj
+
+
+def _geracao_listas_call(method: str, path: str, json_body: dict | None = None, params: dict | None = None):
+    try:
+        response = requests.request(
+            method,
+            f"{GERACAO_LISTAS_API_URL}{path}",
+            json=json_body,
+            params=params,
+            headers={"X-Internal-Secret": GERACAO_LISTAS_INTERNAL_SECRET},
+            timeout=30,
+        )
+    except requests.RequestException as error:
+        raise HTTPException(status_code=502, detail=f"Geração de Listas indisponível: {error}")
+
+    if response.status_code >= 400:
+        try:
+            detail = response.json().get("detail", response.text)
+        except ValueError:
+            detail = response.text
+        raise HTTPException(status_code=response.status_code, detail=detail)
+
+    return _camelize(response.json())
+
+
+class GLCriarCardRequest(BaseModel):
+    titulo: str | None = None
+
+
+class GLChatBriefingRequest(BaseModel):
+    message: str
+    history: list = Field(default_factory=list)
+
+
+class GLFinalizarBriefingRequest(BaseModel):
+    briefing: dict
+    conversa: list = Field(default_factory=list)
+
+
+class GLClassificarRequest(BaseModel):
+    arquivoBase64: str | None = None
+    nomeArquivo: str | None = None
+    textoColado: str | None = None
+
+
+@app.get("/api/geracao-listas/cards", tags=["Geração de Listas"])
+def api_gl_listar_cards(request: Request, todas: bool = False):
+    # Decisão do Ramon: por padrão só as próprias listas (mesmo critério de nome
+    # usado na exclusão); ADMIN pode passar ?todas=true pra ver o histórico
+    # completo do time. Filtragem em memória - geracao-listas não expõe filtro
+    # server-side em /api/cards, e o volume de cards não justifica adicionar um.
+    user = _require_authenticated_user(request)
+    cards = _geracao_listas_call("GET", "/api/cards")
+    if todas and user.get("role") == "ADMIN":
+        return cards
+    nome = (user["name"] or "").strip().lower()
+    return [c for c in cards if (c.get("createdBy") or "").strip().lower() == nome]
+
+
+@app.get("/api/geracao-listas/cards/{card_id}", tags=["Geração de Listas"])
+def api_gl_obter_card(card_id: int, request: Request):
+    _require_authenticated_user(request)
+    return _geracao_listas_call("GET", f"/api/cards/{card_id}")
+
+
+@app.post("/api/geracao-listas/cards/validacao", tags=["Geração de Listas"])
+def api_gl_criar_card(payload: GLCriarCardRequest, request: Request):
+    user = _require_authenticated_user(request)
+    return _geracao_listas_call("POST", "/api/cards", json_body={
+        "titulo": payload.titulo,
+        "created_by": user["name"],
+    })
+
+
+@app.delete("/api/geracao-listas/cards/{card_id}", tags=["Geração de Listas"])
+def api_gl_excluir_card(card_id: int, request: Request):
+    # Decisão do Ramon: só quem criou a lista pode excluí-la, com bypass pra
+    # ADMIN (pra poder limpar lixo/teste de qualquer vendedora - bate com o
+    # botão que o frontend já implementou como createdBy===nome OU role===
+    # ADMIN). created_by é injetado a partir de user["name"] na criação
+    # (criarCardValidacao / finalizarBriefing), nunca vem do client - então
+    # comparar contra o nome do usuário logado é confiável para cards criados
+    # por aqui. Cards antigos do app standalone (created_by = texto livre
+    # digitado) só são excluíveis por não-admin se o texto bater exatamente
+    # com o nome de conta (case-insensitive).
+    user = _require_authenticated_user(request)
+    if user.get("role") != "ADMIN":
+        card = _geracao_listas_call("GET", f"/api/cards/{card_id}")
+        dono = (card.get("createdBy") or "").strip().lower()
+        if dono != (user["name"] or "").strip().lower():
+            raise HTTPException(status_code=403, detail="Só quem criou esta lista pode excluí-la")
+    return _geracao_listas_call("POST", f"/api/cards/{card_id}/excluir")
+
+
+@app.post("/api/geracao-listas/cards/{card_id}/classificar", tags=["Geração de Listas"])
+def api_gl_classificar(card_id: int, payload: GLClassificarRequest, request: Request):
+    _require_authenticated_user(request)
+    return _geracao_listas_call("POST", f"/api/cards/{card_id}/classificar", json_body={
+        "arquivo_base64": payload.arquivoBase64,
+        "nome_arquivo": payload.nomeArquivo,
+        "texto_colado": payload.textoColado,
+    })
+
+
+@app.post("/api/geracao-listas/cards/{card_id}/exportar", tags=["Geração de Listas"])
+def api_gl_exportar(card_id: int, request: Request):
+    _require_authenticated_user(request)
+    return _geracao_listas_call("GET", f"/api/cards/{card_id}/export")
+
+
+@app.get("/api/geracao-listas/buscar", tags=["Geração de Listas"])
+def api_gl_buscar(request: Request, nome: str, cnpj: str = ""):
+    _require_authenticated_user(request)
+    return _geracao_listas_call("GET", "/api/buscar", params={"nome": nome, "cnpj": cnpj})
+
+
+@app.post("/api/geracao-listas/briefing/chat", tags=["Geração de Listas"])
+def api_gl_chat_briefing(payload: GLChatBriefingRequest, request: Request):
+    _require_authenticated_user(request)
+    return _geracao_listas_call("POST", "/api/briefing/chat", json_body={
+        "message": payload.message,
+        "history": _snakeify(payload.history),
+    })
+
+
+@app.post("/api/geracao-listas/briefing/finalizar", tags=["Geração de Listas"])
+def api_gl_finalizar_briefing(payload: GLFinalizarBriefingRequest, request: Request):
+    user = _require_authenticated_user(request)
+    return _geracao_listas_call("POST", "/api/briefing/finalizar", json_body={
+        "briefing": _snakeify(payload.briefing),
+        "conversa": _snakeify(payload.conversa),
+        "created_by": user["name"],
+    })
