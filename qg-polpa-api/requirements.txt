@@ -6,4 +6,6 @@ bcrypt==4.2.1
 PyJWT==2.10.1
 anthropic
 python-dotenv
-requests==2.34.1
+rapidfuzz==3.14.5
+unidecode
+openpyxl==3.1.5
