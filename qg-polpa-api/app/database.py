@@ -1343,7 +1343,10 @@ def list_dashboard_original_evolucao_mensal(filtros: dict | None = None) -> list
             COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volume,
             COALESCE(SUM(CASE WHEN fv.tipo_receita IN ('VENDA_FIRME','DEVOLUCAO') THEN fv.valor_pendente ELSE 0 END), 0) AS venda_firme,
             COALESCE(SUM(CASE WHEN fv.tipo_receita = 'FORECAST' THEN fv.valor_pendente ELSE 0 END), 0) AS forecast,
-            COALESCE(SUM(CASE WHEN fv.tipo_receita = 'NOVO_PROJETO' THEN fv.valor_pendente ELSE 0 END), 0) AS novo_projeto
+            COALESCE(SUM(CASE WHEN fv.tipo_receita = 'NOVO_PROJETO' THEN fv.valor_pendente ELSE 0 END), 0) AS novo_projeto,
+            COALESCE(SUM(CASE WHEN fv.tipo_receita IN ('VENDA_FIRME','DEVOLUCAO') THEN fv.qtd_pendente_kg ELSE 0 END), 0) AS volume_venda_firme,
+            COALESCE(SUM(CASE WHEN fv.tipo_receita = 'FORECAST' THEN fv.qtd_pendente_kg ELSE 0 END), 0) AS volume_forecast,
+            COALESCE(SUM(CASE WHEN fv.tipo_receita = 'NOVO_PROJETO' THEN fv.qtd_pendente_kg ELSE 0 END), 0) AS volume_novo_projeto
         FROM dbo.fato_vendas fv
         {clause}
         GROUP BY FORMAT(fv.dt_entrega_cliente, 'yyyy-MM')
@@ -1359,6 +1362,9 @@ def list_dashboard_original_evolucao_mensal(filtros: dict | None = None) -> list
             "vendaFirme": _dash_number(row.venda_firme),
             "forecast": _dash_number(row.forecast),
             "novoProjeto": _dash_number(row.novo_projeto),
+            "volumeVendaFirme": _dash_number(row.volume_venda_firme),
+            "volumeForecast": _dash_number(row.volume_forecast),
+            "volumeNovoProjeto": _dash_number(row.volume_novo_projeto),
         }
         for row in rows
     ]
@@ -1641,6 +1647,174 @@ def list_dashboard_original_cliente_mix(cod_parc: int, filtros: dict | None = No
     ]
 
 
+# =============================================================================
+# Dashboard Executivo — Top Produtos (espelha Top Clientes, eixo invertido)
+# =============================================================================
+
+def list_dashboard_original_produtos_top(filtros: dict | None = None, limit: int | None = None) -> list[dict]:
+    clause, params = _dash_build_fato_where(filtros)
+    safe_limit = int(limit or 0)
+    top_clause = f"TOP ({max(1, min(safe_limit, 500))}) " if safe_limit > 0 else ""
+    rows = _dash_fetch_all(
+        f"""
+        SELECT {top_clause}
+            fv.cod_produto AS cod_produto,
+            COALESCE(dp.nome_produto, fv.nome_produto) AS nome_produto,
+            fv.grupo_produto AS grupo_produto,
+            COALESCE(SUM(fv.valor_pendente), 0) AS faturamento,
+            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volume,
+            COUNT(DISTINCT fv.cod_parc) AS clientes
+        FROM dbo.fato_vendas fv
+        LEFT JOIN dbo.dim_produto dp ON fv.cod_produto = dp.cod_produto
+        {clause}
+        GROUP BY fv.cod_produto, dp.nome_produto, fv.nome_produto, fv.grupo_produto
+        ORDER BY SUM(fv.valor_pendente) DESC
+        """,
+        params,
+    )
+    return [
+        {
+            "codProduto": _dash_int(row.cod_produto),
+            "nomeProduto": row.nome_produto,
+            "grupoProduto": row.grupo_produto,
+            "faturamento": _dash_number(row.faturamento),
+            "volume": _dash_number(row.volume),
+            "clientes": _dash_int(row.clientes),
+        }
+        for row in rows
+    ]
+
+
+def list_dashboard_original_produto_mix(cod_produto: int, filtros: dict | None = None, limit: int = 30) -> list[dict]:
+    """Para um produto, lista os clientes que o compraram (inverso de list_dashboard_original_cliente_mix)."""
+    filtros_produto = dict(filtros or {})
+    filtros_produto["codProduto"] = cod_produto
+    clause, params = _dash_build_fato_where(filtros_produto)
+    safe_limit = max(1, min(int(limit or 30), 200))
+    rows = _dash_fetch_all(
+        f"""
+        SELECT TOP ({safe_limit})
+            fv.cod_parc AS cod_parc,
+            COALESCE(dc.razao_social, fv.RAZAOSOCIAL) AS razao_social,
+            COALESCE(SUM(fv.valor_pendente), 0) AS faturamento,
+            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volume
+        FROM dbo.fato_vendas fv
+        LEFT JOIN dbo.dim_cliente dc ON fv.cod_parc = dc.cod_parc
+        {clause}
+        GROUP BY fv.cod_parc, dc.razao_social, fv.RAZAOSOCIAL
+        ORDER BY SUM(fv.valor_pendente) DESC
+        """,
+        params,
+    )
+    return [
+        {
+            "codParc": _dash_int(row.cod_parc),
+            "razaoSocial": row.razao_social,
+            "faturamento": _dash_number(row.faturamento),
+            "volume": _dash_number(row.volume),
+        }
+        for row in rows
+    ]
+
+
+# =============================================================================
+# Dashboard Executivo — Top Regiões (Norte/Nordeste/Centro-Oeste/Sudeste/Sul)
+# =============================================================================
+
+REGIOES_BRASIL: dict[str, list[str]] = {
+    "Norte": ["AC", "AP", "AM", "PA", "RO", "RR", "TO"],
+    "Nordeste": ["AL", "BA", "CE", "MA", "PB", "PE", "PI", "RN", "SE"],
+    "Centro-Oeste": ["GO", "MT", "MS", "DF"],
+    "Sudeste": ["ES", "MG", "RJ", "SP"],
+    "Sul": ["PR", "RS", "SC"],
+}
+
+NOMES_ESTADOS: dict[str, str] = {
+    "AC": "Acre", "AL": "Alagoas", "AP": "Amapá", "AM": "Amazonas", "BA": "Bahia",
+    "CE": "Ceará", "DF": "Distrito Federal", "ES": "Espírito Santo", "GO": "Goiás",
+    "MA": "Maranhão", "MT": "Mato Grosso", "MS": "Mato Grosso do Sul", "MG": "Minas Gerais",
+    "PA": "Pará", "PB": "Paraíba", "PR": "Paraná", "PE": "Pernambuco", "PI": "Piauí",
+    "RJ": "Rio de Janeiro", "RN": "Rio Grande do Norte", "RS": "Rio Grande do Sul",
+    "RO": "Rondônia", "RR": "Roraima", "SC": "Santa Catarina", "SP": "São Paulo",
+    "SE": "Sergipe", "TO": "Tocantins",
+}
+
+
+def _regiao_case_sql(alias: str = "fv") -> str:
+    """CASE SQL que mapeia fv.uf para a região do Brasil correspondente."""
+    partes = []
+    for regiao, ufs in REGIOES_BRASIL.items():
+        ufs_sql = ",".join(f"'{uf}'" for uf in ufs)
+        partes.append(f"WHEN {alias}.uf IN ({ufs_sql}) THEN '{regiao}'")
+    return "CASE " + " ".join(partes) + " ELSE NULL END"
+
+
+def list_dashboard_original_regioes_top(filtros: dict | None = None) -> list[dict]:
+    clause, params = _dash_build_fato_where(filtros)
+    regiao_expr = _regiao_case_sql("fv")
+    rows = _dash_fetch_all(
+        f"""
+        SELECT
+            {regiao_expr} AS regiao,
+            COALESCE(SUM(fv.valor_pendente), 0) AS faturamento,
+            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volume,
+            COUNT(DISTINCT fv.cod_parc) AS clientes,
+            COUNT(DISTINCT fv.uf) AS estados
+        FROM dbo.fato_vendas fv
+        {clause}
+        GROUP BY {regiao_expr}
+        """,
+        params,
+    )
+    resultado = [
+        {
+            "regiao": row.regiao,
+            "faturamento": _dash_number(row.faturamento),
+            "volume": _dash_number(row.volume),
+            "clientes": _dash_int(row.clientes),
+            "estados": _dash_int(row.estados),
+        }
+        for row in rows
+        if row.regiao
+    ]
+    resultado.sort(key=lambda r: r["faturamento"], reverse=True)
+    return resultado
+
+
+def list_dashboard_original_regiao_mix(regiao: str, filtros: dict | None = None) -> list[dict]:
+    """Para uma região, lista os estados (UF) que a compõem com faturamento/volume."""
+    ufs = REGIOES_BRASIL.get(regiao, [])
+    if not ufs:
+        return []
+    clause, params = _dash_build_fato_where(filtros)
+    ufs_placeholders = ",".join(["?"] * len(ufs))
+    rows = _dash_fetch_all(
+        f"""
+        SELECT
+            fv.uf AS uf,
+            COALESCE(SUM(fv.valor_pendente), 0) AS faturamento,
+            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volume,
+            COUNT(DISTINCT fv.cod_parc) AS clientes
+        FROM dbo.fato_vendas fv
+        {clause}
+        AND fv.uf IN ({ufs_placeholders})
+        GROUP BY fv.uf
+        ORDER BY SUM(fv.valor_pendente) DESC
+        """,
+        [*params, *ufs],
+    )
+    return [
+        {
+            "uf": row.uf,
+            "nomeEstado": NOMES_ESTADOS.get((row.uf or "").strip().upper(), row.uf),
+            "faturamento": _dash_number(row.faturamento),
+            "volume": _dash_number(row.volume),
+            "clientes": _dash_int(row.clientes),
+        }
+        for row in rows
+    ]
+
+
 def get_dashboard_original_filtros_disponiveis() -> dict:
     conn = get_connection()
     cursor = conn.cursor()
@@ -1713,6 +1887,8 @@ def get_dashboard_original_resumo(filtros: dict | None = None, limit_clientes: i
         # Importante: sem limite por padrão. O frontend calcula o percentual usando a soma
         # da lista recebida, como no backend tRPC original. Limitar aqui infla a participação.
         "clientesTop": list_dashboard_original_clientes_top(filtros, limit_clientes),
+        "produtosTop": list_dashboard_original_produtos_top(filtros, limit_clientes),
+        "regioesTop": list_dashboard_original_regioes_top(filtros),
         "orcamentoKpis": get_dashboard_original_orcamento_kpis(filtros),
         "orcamentoMensal": list_dashboard_original_orcamento_mensal(filtros),
     }

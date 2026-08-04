@@ -574,6 +574,10 @@ from app.database import (
     get_dashboard_original_resumo,
     list_dashboard_original_cliente_mix,
     list_dashboard_original_clientes_top,
+    list_dashboard_original_produto_mix,
+    list_dashboard_original_produtos_top,
+    list_dashboard_original_regiao_mix,
+    list_dashboard_original_regioes_top,
     list_dashboard_original_drilldown,
     list_dashboard_original_evolucao_ano_anterior,
     list_dashboard_original_evolucao_mensal,
@@ -1096,6 +1100,70 @@ def api_dashboard_original_clientes_top(
 ):
     filtros = _build_dashboard_filtros(dataInicio, dataFim, mercados, vendedores, projetos, gruposProduto, tiposReceita, periodos=periodos)
     return list_dashboard_original_clientes_top(filtros, limit)
+
+
+@app.get("/api/dashboard-original/produtos-top")
+def api_dashboard_original_produtos_top(
+    dataInicio: str | None = Query(default="2026-01-01"),
+    dataFim: str | None = Query(default="2026-12-31"),
+    periodos: list[str] | None = Query(default=None),
+    mercados: list[str] | None = Query(default=None),
+    vendedores: list[str] | None = Query(default=None),
+    projetos: list[str] | None = Query(default=None),
+    gruposProduto: list[str] | None = Query(default=None),
+    tiposReceita: list[str] | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=500),
+):
+    filtros = _build_dashboard_filtros(dataInicio, dataFim, mercados, vendedores, projetos, gruposProduto, tiposReceita, periodos=periodos)
+    return list_dashboard_original_produtos_top(filtros, limit)
+
+
+@app.get("/api/dashboard-original/produtos/{cod_produto}/mix")
+def api_dashboard_original_produto_mix(
+    cod_produto: int,
+    dataInicio: str | None = Query(default="2026-01-01"),
+    dataFim: str | None = Query(default="2026-12-31"),
+    periodos: list[str] | None = Query(default=None),
+    mercados: list[str] | None = Query(default=None),
+    vendedores: list[str] | None = Query(default=None),
+    projetos: list[str] | None = Query(default=None),
+    gruposProduto: list[str] | None = Query(default=None),
+    tiposReceita: list[str] | None = Query(default=None),
+    limit: int = Query(default=30, ge=1, le=200),
+):
+    filtros = _build_dashboard_filtros(dataInicio, dataFim, mercados, vendedores, projetos, gruposProduto, tiposReceita, periodos=periodos)
+    return list_dashboard_original_produto_mix(cod_produto, filtros, limit)
+
+
+@app.get("/api/dashboard-original/regioes-top")
+def api_dashboard_original_regioes_top(
+    dataInicio: str | None = Query(default="2026-01-01"),
+    dataFim: str | None = Query(default="2026-12-31"),
+    periodos: list[str] | None = Query(default=None),
+    mercados: list[str] | None = Query(default=None),
+    vendedores: list[str] | None = Query(default=None),
+    projetos: list[str] | None = Query(default=None),
+    gruposProduto: list[str] | None = Query(default=None),
+    tiposReceita: list[str] | None = Query(default=None),
+):
+    filtros = _build_dashboard_filtros(dataInicio, dataFim, mercados, vendedores, projetos, gruposProduto, tiposReceita, periodos=periodos)
+    return list_dashboard_original_regioes_top(filtros)
+
+
+@app.get("/api/dashboard-original/regioes/{regiao}/mix")
+def api_dashboard_original_regiao_mix(
+    regiao: str,
+    dataInicio: str | None = Query(default="2026-01-01"),
+    dataFim: str | None = Query(default="2026-12-31"),
+    periodos: list[str] | None = Query(default=None),
+    mercados: list[str] | None = Query(default=None),
+    vendedores: list[str] | None = Query(default=None),
+    projetos: list[str] | None = Query(default=None),
+    gruposProduto: list[str] | None = Query(default=None),
+    tiposReceita: list[str] | None = Query(default=None),
+):
+    filtros = _build_dashboard_filtros(dataInicio, dataFim, mercados, vendedores, projetos, gruposProduto, tiposReceita, periodos=periodos)
+    return list_dashboard_original_regiao_mix(regiao, filtros)
 
 
 @app.get("/api/dashboard-original/drilldown/{tipo_receita}")
