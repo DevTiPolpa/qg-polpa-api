@@ -2628,3 +2628,59 @@ def api_gl_finalizar_briefing(payload: GLFinalizarBriefingRequest, request: Requ
     user = _require_authenticated_user(request)
     resultado = gl_service.finalizar_briefing(_snakeify(payload.briefing), _snakeify(payload.conversa), user["name"])
     return _camelize(resultado)
+
+
+# =============================================================================
+# Movimentação de Clientes e Produtos — Abertos/Perdidos e Lançados/Descontinuados
+# =============================================================================
+
+from app.database import (
+    get_movimentacao_clientes,
+    get_movimentacao_produtos,
+    get_movimentacao_cliente_produtos,
+    get_movimentacao_produto_clientes,
+)
+
+
+@app.get("/api/movimentacao/clientes", tags=["Movimentação"])
+def api_movimentacao_clientes(ano: int = Query(..., ge=2000, le=2100)):
+    try:
+        return get_movimentacao_clientes(ano)
+    except Exception as error:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erro ao calcular movimentação de clientes: {error}",
+        )
+
+
+@app.get("/api/movimentacao/produtos", tags=["Movimentação"])
+def api_movimentacao_produtos(ano: int = Query(..., ge=2000, le=2100)):
+    try:
+        return get_movimentacao_produtos(ano)
+    except Exception as error:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erro ao calcular movimentação de produtos: {error}",
+        )
+
+
+@app.get("/api/movimentacao/clientes/{cod_parc}/produtos", tags=["Movimentação"])
+def api_movimentacao_cliente_produtos(cod_parc: int, ano: int = Query(..., ge=2000, le=2100)):
+    try:
+        return get_movimentacao_cliente_produtos(cod_parc, ano)
+    except Exception as error:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erro ao listar produtos do cliente: {error}",
+        )
+
+
+@app.get("/api/movimentacao/produtos/{cod_produto}/clientes", tags=["Movimentação"])
+def api_movimentacao_produto_clientes(cod_produto: int, ano: int = Query(..., ge=2000, le=2100)):
+    try:
+        return get_movimentacao_produto_clientes(cod_produto, ano)
+    except Exception as error:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erro ao listar clientes do produto: {error}",
+        )

@@ -5355,3 +5355,250 @@ def get_funil_scorecard(recorte_selecionado: str) -> dict:
         "acao": acao,
         "acaoTotal": acao_total,
     }
+
+
+# =============================================================================
+# Movimentação de Clientes e Produtos — Abertos/Perdidos (clientes) e
+# Lançados/Descontinuados (produtos), comparando o ano selecionado com o
+# ano imediatamente anterior. Somente leitura sobre dbo.fato_vendas — não
+# reaproveita nem altera nenhuma regra das telas existentes.
+# =============================================================================
+
+def _mov_number(value: Any) -> float:
+    if isinstance(value, Decimal):
+        return float(value)
+    return float(value or 0)
+
+
+def _mov_int(value: Any) -> int:
+    return int(value or 0)
+
+
+def _mov_date(value: Any) -> str | None:
+    if value is None:
+        return None
+    if hasattr(value, "strftime"):
+        return value.strftime("%Y-%m-%d")
+    return str(value)[:10]
+
+
+def get_movimentacao_clientes(ano: int) -> dict:
+    """Clientes Abertos (venda só no ano selecionado) e Perdidos (venda só no ano anterior).
+
+    Uma única consulta agregada por cliente x ano (GROUP BY cod_parc, ano) cobre as duas
+    visões: a classificação Abertos/Perdidos é feita em Python, comparando os dois conjuntos
+    já agregados — evita rodar a consulta pesada duas vezes e nunca traz venda por venda.
+    """
+    ano_anterior = ano - 1
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT
+            fv.cod_parc AS cod_parc,
+            COALESCE(dc.razao_social, fv.RAZAOSOCIAL) AS razao_social,
+            YEAR(fv.dt_entrega_cliente) AS ano,
+            COALESCE(SUM(fv.valor_pendente), 0) AS faturamento,
+            COUNT(DISTINCT fv.nro_unico) AS pedidos,
+            MIN(fv.dt_entrega_cliente) AS primeira_compra,
+            MAX(fv.dt_entrega_cliente) AS ultima_compra
+        FROM dbo.fato_vendas fv
+        LEFT JOIN dbo.dim_cliente dc ON fv.cod_parc = dc.cod_parc
+        WHERE YEAR(fv.dt_entrega_cliente) IN (?, ?)
+          AND (fv.cod_top IS NULL OR fv.cod_top != 1023)
+          AND (fv.[top] IS NULL OR fv.[top] NOT LIKE '%ESTOQUE MINIM%')
+        GROUP BY fv.cod_parc, dc.razao_social, fv.RAZAOSOCIAL, YEAR(fv.dt_entrega_cliente)
+        """,
+        ano, ano_anterior,
+    )
+    rows = cursor.fetchall()
+    cursor.close()
+    conn.close()
+
+    atual: dict[int, Any] = {}
+    anterior: dict[int, Any] = {}
+    for row in rows:
+        cod_parc = _mov_int(row.cod_parc)
+        (atual if _mov_int(row.ano) == ano else anterior)[cod_parc] = row
+
+    abertos = [
+        {
+            "codParc": cod_parc,
+            "razaoSocial": row.razao_social or f"Cliente {cod_parc}",
+            "faturamento": _mov_number(row.faturamento),
+            "pedidos": _mov_int(row.pedidos),
+            "primeiraCompra": _mov_date(row.primeira_compra),
+            "ultimaCompra": _mov_date(row.ultima_compra),
+        }
+        for cod_parc, row in atual.items()
+        if cod_parc not in anterior
+    ]
+    abertos.sort(key=lambda r: r["faturamento"], reverse=True)
+
+    data_referencia = date(ano_anterior, 12, 31)
+    perdidos = []
+    for cod_parc, row in anterior.items():
+        if cod_parc in atual:
+            continue
+        ultima_compra = _mov_date(row.ultima_compra)
+        dias_sem_comprar = None
+        if ultima_compra:
+            dias_sem_comprar = (data_referencia - datetime.strptime(ultima_compra, "%Y-%m-%d").date()).days
+        perdidos.append({
+            "codParc": cod_parc,
+            "razaoSocial": row.razao_social or f"Cliente {cod_parc}",
+            "faturamento": _mov_number(row.faturamento),
+            "pedidos": _mov_int(row.pedidos),
+            "ultimaCompra": ultima_compra,
+            "diasSemComprar": dias_sem_comprar,
+        })
+    perdidos.sort(key=lambda r: r["faturamento"], reverse=True)
+
+    return {
+        "ano": ano,
+        "anoAnterior": ano_anterior,
+        "abertos": abertos,
+        "perdidos": perdidos,
+    }
+
+
+def get_movimentacao_produtos(ano: int) -> dict:
+    """Produtos Lançados (venda só no ano selecionado) e Descontinuados (venda só no ano
+    anterior). Mesma estratégia de get_movimentacao_clientes: uma consulta agregada por
+    produto x ano cobre as duas visões."""
+    ano_anterior = ano - 1
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT
+            fv.cod_produto AS cod_produto,
+            COALESCE(dp.nome_produto, fv.nome_produto) AS nome_produto,
+            fv.grupo_produto AS grupo_produto,
+            YEAR(fv.dt_entrega_cliente) AS ano,
+            COALESCE(SUM(fv.valor_pendente), 0) AS faturamento,
+            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volume,
+            COUNT(DISTINCT fv.cod_parc) AS clientes,
+            MIN(fv.dt_entrega_cliente) AS primeira_venda,
+            MAX(fv.dt_entrega_cliente) AS ultima_venda
+        FROM dbo.fato_vendas fv
+        LEFT JOIN dbo.dim_produto dp ON fv.cod_produto = dp.cod_produto
+        WHERE YEAR(fv.dt_entrega_cliente) IN (?, ?)
+          AND (fv.cod_top IS NULL OR fv.cod_top != 1023)
+          AND (fv.[top] IS NULL OR fv.[top] NOT LIKE '%ESTOQUE MINIM%')
+        GROUP BY fv.cod_produto, dp.nome_produto, fv.nome_produto, fv.grupo_produto, YEAR(fv.dt_entrega_cliente)
+        """,
+        ano, ano_anterior,
+    )
+    rows = cursor.fetchall()
+    cursor.close()
+    conn.close()
+
+    atual: dict[int, Any] = {}
+    anterior: dict[int, Any] = {}
+    for row in rows:
+        cod_produto = _mov_int(row.cod_produto)
+        (atual if _mov_int(row.ano) == ano else anterior)[cod_produto] = row
+
+    def _serialize(cod_produto: int, row: Any) -> dict:
+        return {
+            "codProduto": cod_produto,
+            "nomeProduto": row.nome_produto or f"Produto {cod_produto}",
+            "grupoProduto": row.grupo_produto,
+            "faturamento": _mov_number(row.faturamento),
+            "volume": _mov_number(row.volume),
+            "clientes": _mov_int(row.clientes),
+            "primeiraVenda": _mov_date(row.primeira_venda),
+            "ultimaVenda": _mov_date(row.ultima_venda),
+        }
+
+    lancados = [_serialize(cod, row) for cod, row in atual.items() if cod not in anterior]
+    lancados.sort(key=lambda r: r["faturamento"], reverse=True)
+
+    descontinuados = [_serialize(cod, row) for cod, row in anterior.items() if cod not in atual]
+    descontinuados.sort(key=lambda r: r["faturamento"], reverse=True)
+
+    return {
+        "ano": ano,
+        "anoAnterior": ano_anterior,
+        "lancados": lancados,
+        "descontinuados": descontinuados,
+    }
+
+
+def get_movimentacao_cliente_produtos(cod_parc: int, ano: int) -> list[dict]:
+    """Produtos comprados por um cliente específico, dentro de um único ano — usado ao
+    expandir uma linha em Clientes Abertos (ano selecionado) ou Perdidos (ano anterior)."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT
+            fv.cod_produto AS cod_produto,
+            COALESCE(dp.nome_produto, fv.nome_produto) AS nome_produto,
+            fv.grupo_produto AS grupo_produto,
+            COALESCE(SUM(fv.valor_pendente), 0) AS faturamento,
+            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volume
+        FROM dbo.fato_vendas fv
+        LEFT JOIN dbo.dim_produto dp ON fv.cod_produto = dp.cod_produto
+        WHERE fv.cod_parc = ?
+          AND YEAR(fv.dt_entrega_cliente) = ?
+          AND (fv.cod_top IS NULL OR fv.cod_top != 1023)
+          AND (fv.[top] IS NULL OR fv.[top] NOT LIKE '%ESTOQUE MINIM%')
+        GROUP BY fv.cod_produto, dp.nome_produto, fv.nome_produto, fv.grupo_produto
+        ORDER BY SUM(fv.valor_pendente) DESC
+        """,
+        cod_parc, ano,
+    )
+    rows = cursor.fetchall()
+    cursor.close()
+    conn.close()
+
+    return [
+        {
+            "codProduto": _mov_int(row.cod_produto),
+            "nomeProduto": row.nome_produto or f"Produto {_mov_int(row.cod_produto)}",
+            "grupoProduto": row.grupo_produto,
+            "faturamento": _mov_number(row.faturamento),
+            "volume": _mov_number(row.volume),
+        }
+        for row in rows
+    ]
+
+
+def get_movimentacao_produto_clientes(cod_produto: int, ano: int) -> list[dict]:
+    """Clientes que compraram um produto específico, dentro de um único ano — usado ao
+    expandir uma linha em Produtos Lançados (ano selecionado) ou Descontinuados (ano anterior)."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT
+            fv.cod_parc AS cod_parc,
+            COALESCE(dc.razao_social, fv.RAZAOSOCIAL) AS razao_social,
+            COALESCE(SUM(fv.valor_pendente), 0) AS faturamento,
+            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volume
+        FROM dbo.fato_vendas fv
+        LEFT JOIN dbo.dim_cliente dc ON fv.cod_parc = dc.cod_parc
+        WHERE fv.cod_produto = ?
+          AND YEAR(fv.dt_entrega_cliente) = ?
+          AND (fv.cod_top IS NULL OR fv.cod_top != 1023)
+          AND (fv.[top] IS NULL OR fv.[top] NOT LIKE '%ESTOQUE MINIM%')
+        GROUP BY fv.cod_parc, dc.razao_social, fv.RAZAOSOCIAL
+        ORDER BY SUM(fv.valor_pendente) DESC
+        """,
+        cod_produto, ano,
+    )
+    rows = cursor.fetchall()
+    cursor.close()
+    conn.close()
+
+    return [
+        {
+            "codParc": _mov_int(row.cod_parc),
+            "razaoSocial": row.razao_social or f"Cliente {_mov_int(row.cod_parc)}",
+            "faturamento": _mov_number(row.faturamento),
+            "volume": _mov_number(row.volume),
+        }
+        for row in rows
+    ]
