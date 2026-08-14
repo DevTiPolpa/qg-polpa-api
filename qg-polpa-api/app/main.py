@@ -2643,9 +2643,13 @@ from app.database import (
 
 
 @app.get("/api/movimentacao/clientes", tags=["Movimentação"])
-def api_movimentacao_clientes(ano: int = Query(..., ge=2000, le=2100)):
+def api_movimentacao_clientes(
+    ano: int = Query(..., ge=2000, le=2100),
+    mercados: list[str] | None = Query(default=None),
+    vendedores: list[str] | None = Query(default=None),
+):
     try:
-        return get_movimentacao_clientes(ano)
+        return get_movimentacao_clientes(ano, mercados, vendedores)
     except Exception as error:
         raise HTTPException(
             status_code=500,
@@ -2654,9 +2658,13 @@ def api_movimentacao_clientes(ano: int = Query(..., ge=2000, le=2100)):
 
 
 @app.get("/api/movimentacao/produtos", tags=["Movimentação"])
-def api_movimentacao_produtos(ano: int = Query(..., ge=2000, le=2100)):
+def api_movimentacao_produtos(
+    ano: int = Query(..., ge=2000, le=2100),
+    mercados: list[str] | None = Query(default=None),
+    vendedores: list[str] | None = Query(default=None),
+):
     try:
-        return get_movimentacao_produtos(ano)
+        return get_movimentacao_produtos(ano, mercados, vendedores)
     except Exception as error:
         raise HTTPException(
             status_code=500,
@@ -2665,9 +2673,14 @@ def api_movimentacao_produtos(ano: int = Query(..., ge=2000, le=2100)):
 
 
 @app.get("/api/movimentacao/clientes/{cod_parc}/produtos", tags=["Movimentação"])
-def api_movimentacao_cliente_produtos(cod_parc: int, ano: int = Query(..., ge=2000, le=2100)):
+def api_movimentacao_cliente_produtos(
+    cod_parc: int,
+    ano: int = Query(..., ge=2000, le=2100),
+    mercados: list[str] | None = Query(default=None),
+    vendedores: list[str] | None = Query(default=None),
+):
     try:
-        return get_movimentacao_cliente_produtos(cod_parc, ano)
+        return get_movimentacao_cliente_produtos(cod_parc, ano, mercados, vendedores)
     except Exception as error:
         raise HTTPException(
             status_code=500,
@@ -2676,9 +2689,14 @@ def api_movimentacao_cliente_produtos(cod_parc: int, ano: int = Query(..., ge=20
 
 
 @app.get("/api/movimentacao/produtos/{cod_produto}/clientes", tags=["Movimentação"])
-def api_movimentacao_produto_clientes(cod_produto: int, ano: int = Query(..., ge=2000, le=2100)):
+def api_movimentacao_produto_clientes(
+    cod_produto: int,
+    ano: int = Query(..., ge=2000, le=2100),
+    mercados: list[str] | None = Query(default=None),
+    vendedores: list[str] | None = Query(default=None),
+):
     try:
-        return get_movimentacao_produto_clientes(cod_produto, ano)
+        return get_movimentacao_produto_clientes(cod_produto, ano, mercados, vendedores)
     except Exception as error:
         raise HTTPException(
             status_code=500,

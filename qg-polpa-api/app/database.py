@@ -5382,34 +5382,70 @@ def _mov_date(value: Any) -> str | None:
     return str(value)[:10]
 
 
-def get_movimentacao_clientes(ano: int) -> dict:
+def _mov_filtros_clause(alias: str, mercados: list[str] | None, vendedores: list[str] | None, params: list[Any]) -> str:
+    """Monta as cláusulas opcionais de Mercado de Vendas e Vendedor (multi-seleção,
+    padrão IN (...) já usado no resto do backend) e retorna prontas para concatenar no WHERE."""
+    clauses = [
+        _build_in_clause(f"{alias}.mercado_vendas", _split_filter(mercados), params),
+        _build_in_clause(f"{alias}.nome_vendedor", _split_filter(vendedores), params),
+    ]
+    return "".join(f" AND {clause}" for clause in clauses if clause)
+
+
+def get_movimentacao_clientes(
+    ano: int,
+    mercados: list[str] | None = None,
+    vendedores: list[str] | None = None,
+) -> dict:
     """Clientes Abertos (venda só no ano selecionado) e Perdidos (venda só no ano anterior).
 
     Uma única consulta agregada por cliente x ano (GROUP BY cod_parc, ano) cobre as duas
     visões: a classificação Abertos/Perdidos é feita em Python, comparando os dois conjuntos
     já agregados — evita rodar a consulta pesada duas vezes e nunca traz venda por venda.
+    O vendedor responsável pela última compra é obtido via ROW_NUMBER() na própria consulta
+    (sem round-trip extra por cliente).
     """
     ano_anterior = ano - 1
+    params: list[Any] = [ano, ano_anterior]
+    filtros_clause = _mov_filtros_clause("fv", mercados, vendedores, params)
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute(
-        """
+        f"""
+        WITH base AS (
+            SELECT
+                fv.cod_parc AS cod_parc,
+                COALESCE(dc.razao_social, fv.RAZAOSOCIAL) AS razao_social,
+                fv.nro_unico AS nro_unico,
+                fv.dt_entrega_cliente AS dt_entrega_cliente,
+                fv.valor_pendente AS valor_pendente,
+                fv.nome_vendedor AS nome_vendedor,
+                YEAR(fv.dt_entrega_cliente) AS ano
+            FROM dbo.fato_vendas fv
+            LEFT JOIN dbo.dim_cliente dc ON fv.cod_parc = dc.cod_parc
+            WHERE YEAR(fv.dt_entrega_cliente) IN (?, ?)
+              AND (fv.cod_top IS NULL OR fv.cod_top != 1023)
+              AND (fv.[top] IS NULL OR fv.[top] NOT LIKE '%ESTOQUE MINIM%')
+              {filtros_clause}
+        ),
+        ranked AS (
+            SELECT *,
+                ROW_NUMBER() OVER (PARTITION BY cod_parc, ano ORDER BY dt_entrega_cliente DESC, nro_unico DESC) AS rn
+            FROM base
+        )
         SELECT
-            fv.cod_parc AS cod_parc,
-            COALESCE(dc.razao_social, fv.RAZAOSOCIAL) AS razao_social,
-            YEAR(fv.dt_entrega_cliente) AS ano,
-            COALESCE(SUM(fv.valor_pendente), 0) AS faturamento,
-            COUNT(DISTINCT fv.nro_unico) AS pedidos,
-            MIN(fv.dt_entrega_cliente) AS primeira_compra,
-            MAX(fv.dt_entrega_cliente) AS ultima_compra
-        FROM dbo.fato_vendas fv
-        LEFT JOIN dbo.dim_cliente dc ON fv.cod_parc = dc.cod_parc
-        WHERE YEAR(fv.dt_entrega_cliente) IN (?, ?)
-          AND (fv.cod_top IS NULL OR fv.cod_top != 1023)
-          AND (fv.[top] IS NULL OR fv.[top] NOT LIKE '%ESTOQUE MINIM%')
-        GROUP BY fv.cod_parc, dc.razao_social, fv.RAZAOSOCIAL, YEAR(fv.dt_entrega_cliente)
+            cod_parc,
+            MAX(razao_social) AS razao_social,
+            ano,
+            COALESCE(SUM(valor_pendente), 0) AS faturamento,
+            COUNT(DISTINCT nro_unico) AS pedidos,
+            MIN(dt_entrega_cliente) AS primeira_compra,
+            MAX(dt_entrega_cliente) AS ultima_compra,
+            MAX(CASE WHEN rn = 1 THEN nome_vendedor END) AS vendedor_ultima_compra
+        FROM ranked
+        GROUP BY cod_parc, ano
         """,
-        ano, ano_anterior,
+        params,
     )
     rows = cursor.fetchall()
     cursor.close()
@@ -5429,6 +5465,7 @@ def get_movimentacao_clientes(ano: int) -> dict:
             "pedidos": _mov_int(row.pedidos),
             "primeiraCompra": _mov_date(row.primeira_compra),
             "ultimaCompra": _mov_date(row.ultima_compra),
+            "vendedorUltimaCompra": row.vendedor_ultima_compra or None,
         }
         for cod_parc, row in atual.items()
         if cod_parc not in anterior
@@ -5451,6 +5488,7 @@ def get_movimentacao_clientes(ano: int) -> dict:
             "pedidos": _mov_int(row.pedidos),
             "ultimaCompra": ultima_compra,
             "diasSemComprar": dias_sem_comprar,
+            "vendedorUltimaCompra": row.vendedor_ultima_compra or None,
         })
     perdidos.sort(key=lambda r: r["faturamento"], reverse=True)
 
@@ -5462,15 +5500,21 @@ def get_movimentacao_clientes(ano: int) -> dict:
     }
 
 
-def get_movimentacao_produtos(ano: int) -> dict:
+def get_movimentacao_produtos(
+    ano: int,
+    mercados: list[str] | None = None,
+    vendedores: list[str] | None = None,
+) -> dict:
     """Produtos Lançados (venda só no ano selecionado) e Descontinuados (venda só no ano
     anterior). Mesma estratégia de get_movimentacao_clientes: uma consulta agregada por
     produto x ano cobre as duas visões."""
     ano_anterior = ano - 1
+    params: list[Any] = [ano, ano_anterior]
+    filtros_clause = _mov_filtros_clause("fv", mercados, vendedores, params)
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute(
-        """
+        f"""
         SELECT
             fv.cod_produto AS cod_produto,
             COALESCE(dp.nome_produto, fv.nome_produto) AS nome_produto,
@@ -5486,9 +5530,10 @@ def get_movimentacao_produtos(ano: int) -> dict:
         WHERE YEAR(fv.dt_entrega_cliente) IN (?, ?)
           AND (fv.cod_top IS NULL OR fv.cod_top != 1023)
           AND (fv.[top] IS NULL OR fv.[top] NOT LIKE '%ESTOQUE MINIM%')
+          {filtros_clause}
         GROUP BY fv.cod_produto, dp.nome_produto, fv.nome_produto, fv.grupo_produto, YEAR(fv.dt_entrega_cliente)
         """,
-        ano, ano_anterior,
+        params,
     )
     rows = cursor.fetchall()
     cursor.close()
@@ -5526,13 +5571,20 @@ def get_movimentacao_produtos(ano: int) -> dict:
     }
 
 
-def get_movimentacao_cliente_produtos(cod_parc: int, ano: int) -> list[dict]:
+def get_movimentacao_cliente_produtos(
+    cod_parc: int,
+    ano: int,
+    mercados: list[str] | None = None,
+    vendedores: list[str] | None = None,
+) -> list[dict]:
     """Produtos comprados por um cliente específico, dentro de um único ano — usado ao
     expandir uma linha em Clientes Abertos (ano selecionado) ou Perdidos (ano anterior)."""
+    params: list[Any] = [cod_parc, ano]
+    filtros_clause = _mov_filtros_clause("fv", mercados, vendedores, params)
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute(
-        """
+        f"""
         SELECT
             fv.cod_produto AS cod_produto,
             COALESCE(dp.nome_produto, fv.nome_produto) AS nome_produto,
@@ -5545,10 +5597,11 @@ def get_movimentacao_cliente_produtos(cod_parc: int, ano: int) -> list[dict]:
           AND YEAR(fv.dt_entrega_cliente) = ?
           AND (fv.cod_top IS NULL OR fv.cod_top != 1023)
           AND (fv.[top] IS NULL OR fv.[top] NOT LIKE '%ESTOQUE MINIM%')
+          {filtros_clause}
         GROUP BY fv.cod_produto, dp.nome_produto, fv.nome_produto, fv.grupo_produto
         ORDER BY SUM(fv.valor_pendente) DESC
         """,
-        cod_parc, ano,
+        params,
     )
     rows = cursor.fetchall()
     cursor.close()
@@ -5566,13 +5619,20 @@ def get_movimentacao_cliente_produtos(cod_parc: int, ano: int) -> list[dict]:
     ]
 
 
-def get_movimentacao_produto_clientes(cod_produto: int, ano: int) -> list[dict]:
+def get_movimentacao_produto_clientes(
+    cod_produto: int,
+    ano: int,
+    mercados: list[str] | None = None,
+    vendedores: list[str] | None = None,
+) -> list[dict]:
     """Clientes que compraram um produto específico, dentro de um único ano — usado ao
     expandir uma linha em Produtos Lançados (ano selecionado) ou Descontinuados (ano anterior)."""
+    params: list[Any] = [cod_produto, ano]
+    filtros_clause = _mov_filtros_clause("fv", mercados, vendedores, params)
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute(
-        """
+        f"""
         SELECT
             fv.cod_parc AS cod_parc,
             COALESCE(dc.razao_social, fv.RAZAOSOCIAL) AS razao_social,
@@ -5584,10 +5644,11 @@ def get_movimentacao_produto_clientes(cod_produto: int, ano: int) -> list[dict]:
           AND YEAR(fv.dt_entrega_cliente) = ?
           AND (fv.cod_top IS NULL OR fv.cod_top != 1023)
           AND (fv.[top] IS NULL OR fv.[top] NOT LIKE '%ESTOQUE MINIM%')
+          {filtros_clause}
         GROUP BY fv.cod_parc, dc.razao_social, fv.RAZAOSOCIAL
         ORDER BY SUM(fv.valor_pendente) DESC
         """,
-        cod_produto, ano,
+        params,
     )
     rows = cursor.fetchall()
     cursor.close()
