@@ -2702,3 +2702,109 @@ def api_movimentacao_produto_clientes(
             status_code=500,
             detail=f"Erro ao listar clientes do produto: {error}",
         )
+
+
+# =============================================================================
+# Tarefas — acompanhamento manual de variações identificadas em Comparativo
+# Semanal, Movimentação de Clientes e Produtos e Recorrentes R×O.
+# =============================================================================
+
+from fastapi import Query
+from app.database import (
+    list_tasks,
+    get_task,
+    create_task,
+    update_task,
+)
+
+TASK_ORIGENS_VALIDAS = ("COMPARATIVO_SEMANAL", "MOVIMENTACAO_CLIENTES_PRODUTOS", "RECORRENTES_RXO")
+TASK_STATUSES_VALIDOS = ("PENDENTE", "EM_ANALISE", "AGUARDANDO_RETORNO", "CONCLUIDA")
+
+
+def _require_task_user(request: Request) -> dict:
+    user = get_current_user_from_request(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Não autenticado")
+    return user
+
+
+class TaskCreateRequest(BaseModel):
+    origem: str
+    tipoOcorrencia: str = Field(min_length=1)
+    codParc: int | None = None
+    razaoSocial: str | None = None
+    codProduto: int | None = None
+    nomeProduto: str | None = None
+    infoVariacao: str | None = None
+    origemUrl: str | None = None
+    fato: str = Field(min_length=1)
+    responsavelId: int
+    prazo: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
+
+
+class TaskUpdateRequest(BaseModel):
+    responsavelId: int | None = None
+    prazo: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    status: str | None = None
+    causa: str | None = None
+    acoes: str | None = None
+
+
+@app.get("/api/tasks", tags=["Tarefas"])
+def api_list_tasks(
+    request: Request,
+    origem: str | None = Query(default=None),
+    status: list[str] | None = Query(default=None),
+    responsavelId: int | None = Query(default=None),
+    codParc: int | None = Query(default=None),
+    codProduto: int | None = Query(default=None),
+):
+    _require_task_user(request)
+    try:
+        return list_tasks({
+            "origem": origem,
+            "status": status,
+            "responsavelId": responsavelId,
+            "codParc": codParc,
+            "codProduto": codProduto,
+        })
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Erro ao listar tarefas: {error}")
+
+
+@app.get("/api/tasks/{task_id}", tags=["Tarefas"])
+def api_get_task(task_id: int, request: Request):
+    _require_task_user(request)
+    try:
+        task = get_task(task_id)
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Erro ao buscar tarefa: {error}")
+    if not task:
+        raise HTTPException(status_code=404, detail="Tarefa não encontrada")
+    return task
+
+
+@app.post("/api/tasks", tags=["Tarefas"])
+def api_create_task(payload: TaskCreateRequest, request: Request):
+    user = _require_task_user(request)
+    if payload.origem not in TASK_ORIGENS_VALIDAS:
+        raise HTTPException(status_code=400, detail="Origem inválida.")
+    try:
+        return create_task(payload.model_dump(), int(user["id"]))
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Erro ao criar tarefa: {error}")
+
+
+@app.patch("/api/tasks/{task_id}", tags=["Tarefas"])
+def api_update_task(task_id: int, payload: TaskUpdateRequest, request: Request):
+    user = _require_task_user(request)
+    if payload.status is not None and payload.status not in TASK_STATUSES_VALIDOS:
+        raise HTTPException(status_code=400, detail="Status inválido.")
+    body = {k: v for k, v in payload.model_dump(exclude_unset=True).items() if v is not None}
+    try:
+        task = update_task(task_id, body, int(user["id"]))
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Erro ao atualizar tarefa: {error}")
+    if not task:
+        raise HTTPException(status_code=404, detail="Tarefa não encontrada")
+    return task

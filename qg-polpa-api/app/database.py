@@ -5663,3 +5663,350 @@ def get_movimentacao_produto_clientes(
         }
         for row in rows
     ]
+
+
+# =============================================================================
+# Tarefas — acompanhamento manual de variações identificadas em Comparativo
+# Semanal, Movimentação de Clientes e Produtos e Recorrentes R×O. Nunca
+# criadas automaticamente: sempre uma ação explícita do usuário numa das 3
+# telas de origem. Tabelas criadas sob demanda (mesmo padrão de
+# ensure_chat_messages_table, IF OBJECT_ID(...) IS NULL).
+# =============================================================================
+
+TASK_ORIGENS = ("COMPARATIVO_SEMANAL", "MOVIMENTACAO_CLIENTES_PRODUTOS", "RECORRENTES_RXO")
+TASK_STATUSES = ("PENDENTE", "EM_ANALISE", "AGUARDANDO_RETORNO", "CONCLUIDA")
+
+_TASK_UPDATABLE_FIELDS = {
+    # payload key -> (coluna, tipo_evento no histórico, chave equivalente no dict serializado)
+    "responsavelId": ("responsavel_id", "RESPONSAVEL", "responsavelId"),
+    "prazo": ("prazo", "PRAZO", "prazo"),
+    "status": ("status", "STATUS", "status"),
+    "causa": ("causa", "CAUSA", "causa"),
+    "acoes": ("acoes", "ACOES", "acoes"),
+}
+
+
+def ensure_qg_tasks_tables() -> None:
+    """Garante a existência das tabelas usadas pela feature de Tarefas."""
+    with get_connection() as connection:
+        cursor = connection.cursor()
+        cursor.execute(
+            """
+            IF OBJECT_ID('dbo.qg_tasks', 'U') IS NULL
+            BEGIN
+                CREATE TABLE dbo.qg_tasks (
+                    id                INT IDENTITY(1,1) NOT NULL PRIMARY KEY,
+                    origem            NVARCHAR(50) NOT NULL
+                                      CONSTRAINT CK_qg_tasks_origem CHECK (origem IN ('COMPARATIVO_SEMANAL','MOVIMENTACAO_CLIENTES_PRODUTOS','RECORRENTES_RXO')),
+                    tipo_ocorrencia   NVARCHAR(50) NOT NULL,
+                    cod_parc          INT NULL,
+                    razao_social      NVARCHAR(255) NULL,
+                    cod_produto       INT NULL,
+                    nome_produto      NVARCHAR(255) NULL,
+                    info_variacao     NVARCHAR(MAX) NULL,
+                    origem_url        NVARCHAR(300) NULL,
+                    fato              NVARCHAR(MAX) NOT NULL,
+                    causa             NVARCHAR(MAX) NULL,
+                    acoes             NVARCHAR(MAX) NULL,
+                    responsavel_id    INT NOT NULL REFERENCES dbo.users(id),
+                    status            NVARCHAR(20) NOT NULL
+                                      CONSTRAINT DF_qg_tasks_status DEFAULT 'PENDENTE'
+                                      CONSTRAINT CK_qg_tasks_status CHECK (status IN ('PENDENTE','EM_ANALISE','AGUARDANDO_RETORNO','CONCLUIDA')),
+                    prazo             DATE NOT NULL,
+                    criado_por_id     INT NOT NULL REFERENCES dbo.users(id),
+                    created_at        DATETIME2 NOT NULL CONSTRAINT DF_qg_tasks_created_at DEFAULT SYSUTCDATETIME(),
+                    updated_at        DATETIME2 NOT NULL CONSTRAINT DF_qg_tasks_updated_at DEFAULT SYSUTCDATETIME()
+                );
+            END;
+
+            IF OBJECT_ID('dbo.qg_task_history', 'U') IS NULL
+            BEGIN
+                CREATE TABLE dbo.qg_task_history (
+                    id             INT IDENTITY(1,1) NOT NULL PRIMARY KEY,
+                    task_id        INT NOT NULL REFERENCES dbo.qg_tasks(id),
+                    tipo_evento    NVARCHAR(30) NOT NULL
+                                   CONSTRAINT CK_qg_task_history_evento CHECK (tipo_evento IN ('CRIACAO','RESPONSAVEL','STATUS','PRAZO','CAUSA','ACOES')),
+                    valor_anterior NVARCHAR(MAX) NULL,
+                    valor_novo     NVARCHAR(MAX) NULL,
+                    usuario_id     INT NOT NULL REFERENCES dbo.users(id),
+                    created_at     DATETIME2 NOT NULL CONSTRAINT DF_qg_task_history_created_at DEFAULT SYSUTCDATETIME()
+                );
+            END;
+
+            IF NOT EXISTS (
+                SELECT 1 FROM sys.indexes
+                WHERE name = 'IX_qg_tasks_origem' AND object_id = OBJECT_ID('dbo.qg_tasks')
+            )
+            BEGIN
+                CREATE INDEX IX_qg_tasks_origem ON dbo.qg_tasks (origem, cod_parc, cod_produto);
+            END;
+
+            IF NOT EXISTS (
+                SELECT 1 FROM sys.indexes
+                WHERE name = 'IX_qg_task_history_task' AND object_id = OBJECT_ID('dbo.qg_task_history')
+            )
+            BEGIN
+                CREATE INDEX IX_qg_task_history_task ON dbo.qg_task_history (task_id, created_at);
+            END;
+            """
+        )
+        connection.commit()
+
+
+def _task_iso_date(value: Any) -> str | None:
+    if value is None:
+        return None
+    if hasattr(value, "strftime"):
+        return value.strftime("%Y-%m-%d")
+    return str(value)[:10]
+
+
+def _task_iso_datetime(value: Any) -> str | None:
+    if value is None:
+        return None
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return str(value)
+
+
+_TASK_SELECT_COLUMNS = """
+    t.id, t.origem, t.tipo_ocorrencia, t.cod_parc, t.razao_social,
+    t.cod_produto, t.nome_produto, t.info_variacao, t.origem_url,
+    t.fato, t.causa, t.acoes, t.responsavel_id, ru.name AS responsavel_nome,
+    t.status, t.prazo, t.criado_por_id, cu.name AS criado_por_nome,
+    t.created_at, t.updated_at
+"""
+
+_TASK_FROM_JOIN = """
+    FROM dbo.qg_tasks t
+    LEFT JOIN dbo.users ru ON ru.id = t.responsavel_id
+    LEFT JOIN dbo.users cu ON cu.id = t.criado_por_id
+"""
+
+
+def _task_row_to_dict(row: Any) -> dict:
+    return {
+        "id": row.id,
+        "origem": row.origem,
+        "tipoOcorrencia": row.tipo_ocorrencia,
+        "codParc": row.cod_parc,
+        "razaoSocial": row.razao_social,
+        "codProduto": row.cod_produto,
+        "nomeProduto": row.nome_produto,
+        "infoVariacao": row.info_variacao,
+        "origemUrl": row.origem_url,
+        "fato": row.fato,
+        "causa": row.causa,
+        "acoes": row.acoes,
+        "responsavelId": row.responsavel_id,
+        "responsavelNome": row.responsavel_nome,
+        "status": row.status,
+        "prazo": _task_iso_date(row.prazo),
+        "criadoPorId": row.criado_por_id,
+        "criadoPorNome": row.criado_por_nome,
+        "createdAt": _task_iso_datetime(row.created_at),
+        "updatedAt": _task_iso_datetime(row.updated_at),
+    }
+
+
+def list_tasks(filtros: dict | None = None) -> list[dict]:
+    """Lista tarefas com filtros opcionais. Sem paginação: é uma lista de curadoria
+    manual (uma tarefa por variação identificada), volume esperado baixo."""
+    ensure_qg_tasks_tables()
+    f = filtros or {}
+    where: list[str] = ["1=1"]
+    params: list[Any] = []
+
+    origem = f.get("origem")
+    if origem:
+        where.append("t.origem = ?")
+        params.append(origem)
+
+    cod_parc = f.get("codParc")
+    if cod_parc is not None:
+        where.append("t.cod_parc = ?")
+        params.append(cod_parc)
+
+    cod_produto = f.get("codProduto")
+    if cod_produto is not None:
+        where.append("t.cod_produto = ?")
+        params.append(cod_produto)
+
+    responsavel_id = f.get("responsavelId")
+    if responsavel_id is not None:
+        where.append("t.responsavel_id = ?")
+        params.append(responsavel_id)
+
+    status_list = f.get("status") or []
+    if isinstance(status_list, str):
+        status_list = [status_list]
+    status_list = [s for s in status_list if s]
+    if status_list:
+        placeholders = ",".join("?" for _ in status_list)
+        where.append(f"t.status IN ({placeholders})")
+        params.extend(status_list)
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        f"""
+        SELECT {_TASK_SELECT_COLUMNS}
+        {_TASK_FROM_JOIN}
+        WHERE {' AND '.join(where)}
+        ORDER BY t.created_at DESC
+        """,
+        params,
+    )
+    rows = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    return [_task_row_to_dict(row) for row in rows]
+
+
+def get_task(task_id: int) -> dict | None:
+    """Detalhe de uma tarefa, com o histórico completo embutido (ordenado do mais
+    antigo para o mais recente)."""
+    ensure_qg_tasks_tables()
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        f"""
+        SELECT {_TASK_SELECT_COLUMNS}
+        {_TASK_FROM_JOIN}
+        WHERE t.id = ?
+        """,
+        [task_id],
+    )
+    row = cursor.fetchone()
+    if not row:
+        cursor.close()
+        conn.close()
+        return None
+
+    task = _task_row_to_dict(row)
+
+    cursor.execute(
+        """
+        SELECT h.id, h.tipo_evento, h.valor_anterior, h.valor_novo, h.usuario_id,
+               u.name AS usuario_nome, h.created_at
+        FROM dbo.qg_task_history h
+        LEFT JOIN dbo.users u ON u.id = h.usuario_id
+        WHERE h.task_id = ?
+        ORDER BY h.created_at ASC, h.id ASC
+        """,
+        [task_id],
+    )
+    historico_rows = cursor.fetchall()
+    cursor.close()
+    conn.close()
+
+    task["historico"] = [
+        {
+            "id": h.id,
+            "tipoEvento": h.tipo_evento,
+            "valorAnterior": h.valor_anterior,
+            "valorNovo": h.valor_novo,
+            "usuarioId": h.usuario_id,
+            "usuarioNome": h.usuario_nome,
+            "createdAt": _task_iso_datetime(h.created_at),
+        }
+        for h in historico_rows
+    ]
+    return task
+
+
+def create_task(payload: dict, criado_por_id: int) -> dict:
+    """Cria uma tarefa (sempre uma ação manual do usuário numa das 3 telas de
+    origem) e grava o primeiro evento de histórico (CRIACAO)."""
+    ensure_qg_tasks_tables()
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        INSERT INTO dbo.qg_tasks (
+            origem, tipo_ocorrencia, cod_parc, razao_social, cod_produto, nome_produto,
+            info_variacao, origem_url, fato, responsavel_id, status, prazo, criado_por_id
+        )
+        OUTPUT INSERTED.id
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDENTE', ?, ?)
+        """,
+        [
+            payload["origem"],
+            payload["tipoOcorrencia"],
+            payload.get("codParc"),
+            payload.get("razaoSocial"),
+            payload.get("codProduto"),
+            payload.get("nomeProduto"),
+            payload.get("infoVariacao"),
+            payload.get("origemUrl"),
+            payload["fato"],
+            payload["responsavelId"],
+            payload["prazo"],
+            criado_por_id,
+        ],
+    )
+    new_id = cursor.fetchone()[0]
+
+    cursor.execute(
+        """
+        INSERT INTO dbo.qg_task_history (task_id, tipo_evento, valor_anterior, valor_novo, usuario_id)
+        VALUES (?, 'CRIACAO', NULL, ?, ?)
+        """,
+        [new_id, f"status PENDENTE · prazo {payload['prazo']}", criado_por_id],
+    )
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+    return get_task(new_id)
+
+
+def update_task(task_id: int, payload: dict, usuario_id: int) -> dict | None:
+    """Atualização parcial de responsável/prazo/status/causa/ações. Só grava
+    histórico dos campos que efetivamente mudaram de valor."""
+    ensure_qg_tasks_tables()
+    current = get_task(task_id)
+    if not current:
+        return None
+
+    sets: list[str] = []
+    params: list[Any] = []
+    history_rows: list[tuple[str, str | None, str | None]] = []
+
+    for field, (column, evento, current_key) in _TASK_UPDATABLE_FIELDS.items():
+        if field not in payload:
+            continue
+        new_value = payload[field]
+        old_value = current.get(current_key)
+        if str(new_value) == str(old_value):
+            continue
+        sets.append(f"{column} = ?")
+        params.append(new_value)
+        history_rows.append((
+            evento,
+            None if old_value is None else str(old_value),
+            None if new_value is None else str(new_value),
+        ))
+
+    if not sets:
+        return current
+
+    sets.append("updated_at = SYSUTCDATETIME()")
+    params.append(task_id)
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(f"UPDATE dbo.qg_tasks SET {', '.join(sets)} WHERE id = ?", params)
+    for evento, old_value, new_value in history_rows:
+        cursor.execute(
+            """
+            INSERT INTO dbo.qg_task_history (task_id, tipo_evento, valor_anterior, valor_novo, usuario_id)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            [task_id, evento, old_value, new_value, usuario_id],
+        )
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+    return get_task(task_id)
