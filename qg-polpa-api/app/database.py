@@ -5683,6 +5683,9 @@ _TASK_UPDATABLE_FIELDS = {
     "status": ("status", "STATUS", "status"),
     "causa": ("causa", "CAUSA", "causa"),
     "acoes": ("acoes", "ACOES", "acoes"),
+    # Só pode ser alterado pelo criador da tarefa enquanto o status for PENDENTE —
+    # a regra é validada em app/main.py (api_update_task), antes de chegar aqui.
+    "tipoOcorrencia": ("tipo_ocorrencia", "TIPO_OCORRENCIA", "tipoOcorrencia"),
 }
 
 
@@ -5725,12 +5728,25 @@ def ensure_qg_tasks_tables() -> None:
                     id             INT IDENTITY(1,1) NOT NULL PRIMARY KEY,
                     task_id        INT NOT NULL REFERENCES dbo.qg_tasks(id),
                     tipo_evento    NVARCHAR(30) NOT NULL
-                                   CONSTRAINT CK_qg_task_history_evento CHECK (tipo_evento IN ('CRIACAO','RESPONSAVEL','STATUS','PRAZO','CAUSA','ACOES')),
+                                   CONSTRAINT CK_qg_task_history_evento CHECK (tipo_evento IN ('CRIACAO','RESPONSAVEL','STATUS','PRAZO','CAUSA','ACOES','TIPO_OCORRENCIA')),
                     valor_anterior NVARCHAR(MAX) NULL,
                     valor_novo     NVARCHAR(MAX) NULL,
                     usuario_id     INT NOT NULL REFERENCES dbo.users(id),
                     created_at     DATETIME2 NOT NULL CONSTRAINT DF_qg_task_history_created_at DEFAULT SYSUTCDATETIME()
                 );
+            END;
+
+            -- Tabela já existia em produção antes de TIPO_OCORRENCIA virar um evento de
+            -- histórico válido: alarga a CHECK constraint em vez de depender da criação
+            -- condicional acima (que só roda se a tabela ainda não existir).
+            IF EXISTS (
+                SELECT 1 FROM sys.check_constraints
+                WHERE name = 'CK_qg_task_history_evento' AND definition NOT LIKE '%TIPO_OCORRENCIA%'
+            )
+            BEGIN
+                ALTER TABLE dbo.qg_task_history DROP CONSTRAINT CK_qg_task_history_evento;
+                ALTER TABLE dbo.qg_task_history ADD CONSTRAINT CK_qg_task_history_evento
+                    CHECK (tipo_evento IN ('CRIACAO','RESPONSAVEL','STATUS','PRAZO','CAUSA','ACOES','TIPO_OCORRENCIA'));
             END;
 
             IF NOT EXISTS (

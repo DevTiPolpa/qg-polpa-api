@@ -2748,6 +2748,9 @@ class TaskUpdateRequest(BaseModel):
     status: str | None = None
     causa: str | None = None
     acoes: str | None = None
+    # Só o criador da tarefa pode alterar, e só enquanto o status ainda for PENDENTE
+    # (validado em api_update_task, com base no estado atual gravado no banco).
+    tipoOcorrencia: str | None = Field(default=None, min_length=1)
 
 
 @app.get("/api/tasks", tags=["Tarefas"])
@@ -2801,6 +2804,19 @@ def api_update_task(task_id: int, payload: TaskUpdateRequest, request: Request):
     if payload.status is not None and payload.status not in TASK_STATUSES_VALIDOS:
         raise HTTPException(status_code=400, detail="Status inválido.")
     body = {k: v for k, v in payload.model_dump(exclude_unset=True).items() if v is not None}
+
+    if "tipoOcorrencia" in body:
+        try:
+            atual = get_task(task_id)
+        except Exception as error:
+            raise HTTPException(status_code=500, detail=f"Erro ao buscar tarefa: {error}")
+        if not atual:
+            raise HTTPException(status_code=404, detail="Tarefa não encontrada")
+        if atual["status"] != "PENDENTE":
+            raise HTTPException(status_code=403, detail="Tipo de Ocorrência só pode ser alterado enquanto a tarefa está Pendente.")
+        if int(atual["criadoPorId"]) != int(user["id"]):
+            raise HTTPException(status_code=403, detail="Apenas quem criou a tarefa pode alterar o Tipo de Ocorrência.")
+
     try:
         task = update_task(task_id, body, int(user["id"]))
     except Exception as error:
