@@ -2808,3 +2808,50 @@ def api_update_task(task_id: int, payload: TaskUpdateRequest, request: Request):
     if not task:
         raise HTTPException(status_code=404, detail="Tarefa não encontrada")
     return task
+
+
+# =============================================================================
+# Comentários — histórico de anotações por linha nas 3 telas de análise
+# =============================================================================
+
+from app.database import (
+    list_comentarios,
+    create_comentario,
+)
+
+COMENTARIO_ORIGENS_VALIDAS = ("COMPARATIVO_SEMANAL", "MOVIMENTACAO_CLIENTES_PRODUTOS", "RECORRENTES_RXO")
+
+
+class ComentarioCreateRequest(BaseModel):
+    origem: str
+    codParc: int | None = None
+    razaoSocial: str | None = None
+    codProduto: int | None = None
+    nomeProduto: str | None = None
+    motivo: str = Field(min_length=1)
+    comentario: str = Field(min_length=1)
+
+
+@app.get("/api/comentarios", tags=["Comentários"])
+def api_list_comentarios(
+    request: Request,
+    origem: str | None = Query(default=None),
+    codParc: int | None = Query(default=None),
+    codProduto: int | None = Query(default=None),
+):
+    _require_task_user(request)
+    try:
+        return list_comentarios({"origem": origem, "codParc": codParc, "codProduto": codProduto})
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Erro ao listar comentários: {error}")
+
+
+@app.post("/api/comentarios", tags=["Comentários"])
+def api_create_comentario(payload: ComentarioCreateRequest, request: Request):
+    user = _require_task_user(request)
+    if payload.origem not in COMENTARIO_ORIGENS_VALIDAS:
+        raise HTTPException(status_code=400, detail="Origem inválida.")
+    try:
+        return create_comentario(payload.model_dump(), int(user["id"]))
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Erro ao criar comentário: {error}")

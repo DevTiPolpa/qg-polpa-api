@@ -6010,3 +6010,180 @@ def update_task(task_id: int, payload: dict, usuario_id: int) -> dict | None:
     conn.close()
 
     return get_task(task_id)
+
+
+# =============================================================================
+# Comentários — histórico de anotações por linha nas telas de Comparativo
+# Semanal, Movimentação de Clientes e Produtos e Recorrentes R×O. Somente
+# inclusão (nunca editado nem apagado): cada comentário é uma linha permanente
+# do histórico. Tabela criada sob demanda (mesmo padrão de ensure_qg_tasks_tables).
+# =============================================================================
+
+COMENTARIO_ORIGENS = ("COMPARATIVO_SEMANAL", "MOVIMENTACAO_CLIENTES_PRODUTOS", "RECORRENTES_RXO")
+
+
+def ensure_qg_comentarios_table() -> None:
+    with get_connection() as connection:
+        cursor = connection.cursor()
+        cursor.execute(
+            """
+            IF OBJECT_ID('dbo.qg_comentarios', 'U') IS NULL
+            BEGIN
+                CREATE TABLE dbo.qg_comentarios (
+                    id            INT IDENTITY(1,1) NOT NULL PRIMARY KEY,
+                    origem        NVARCHAR(50) NOT NULL
+                                  CONSTRAINT CK_qg_comentarios_origem CHECK (origem IN ('COMPARATIVO_SEMANAL','MOVIMENTACAO_CLIENTES_PRODUTOS','RECORRENTES_RXO')),
+                    cod_parc      INT NULL,
+                    razao_social  NVARCHAR(255) NULL,
+                    cod_produto   INT NULL,
+                    nome_produto  NVARCHAR(255) NULL,
+                    motivo        NVARCHAR(50) NOT NULL,
+                    comentario    NVARCHAR(MAX) NOT NULL,
+                    autor_id      INT NOT NULL REFERENCES dbo.users(id),
+                    created_at    DATETIME2 NOT NULL CONSTRAINT DF_qg_comentarios_created_at DEFAULT SYSUTCDATETIME()
+                );
+            END;
+
+            IF NOT EXISTS (
+                SELECT 1 FROM sys.indexes
+                WHERE name = 'IX_qg_comentarios_origem' AND object_id = OBJECT_ID('dbo.qg_comentarios')
+            )
+            BEGIN
+                CREATE INDEX IX_qg_comentarios_origem ON dbo.qg_comentarios (origem, cod_parc, cod_produto, created_at);
+            END;
+            """
+        )
+        connection.commit()
+
+
+def _comentario_iso_datetime(value: Any) -> str | None:
+    if value is None:
+        return None
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return str(value)
+
+
+def list_comentarios(filtros: dict | None = None) -> list[dict]:
+    """Lista comentários com filtros opcionais (origem, codParc, codProduto), do mais
+    recente para o mais antigo. Sem paginação — mesmo raciocínio de list_tasks."""
+    ensure_qg_comentarios_table()
+    f = filtros or {}
+    where: list[str] = ["1=1"]
+    params: list[Any] = []
+
+    origem = f.get("origem")
+    if origem:
+        where.append("c.origem = ?")
+        params.append(origem)
+
+    cod_parc = f.get("codParc")
+    if cod_parc is not None:
+        where.append("c.cod_parc = ?")
+        params.append(cod_parc)
+
+    cod_produto = f.get("codProduto")
+    if cod_produto is not None:
+        where.append("c.cod_produto = ?")
+        params.append(cod_produto)
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        f"""
+        SELECT
+            c.id, c.origem, c.cod_parc, c.razao_social, c.cod_produto, c.nome_produto,
+            c.motivo, c.comentario, c.autor_id, u.name AS autor_nome, c.created_at
+        FROM dbo.qg_comentarios c
+        LEFT JOIN dbo.users u ON u.id = c.autor_id
+        WHERE {' AND '.join(where)}
+        ORDER BY c.created_at DESC
+        """,
+        params,
+    )
+    rows = cursor.fetchall()
+    cursor.close()
+    conn.close()
+
+    return [
+        {
+            "id": row.id,
+            "origem": row.origem,
+            "codParc": row.cod_parc,
+            "razaoSocial": row.razao_social,
+            "codProduto": row.cod_produto,
+            "nomeProduto": row.nome_produto,
+            "motivo": row.motivo,
+            "comentario": row.comentario,
+            "autorId": row.autor_id,
+            "autorNome": row.autor_nome,
+            "createdAt": _comentario_iso_datetime(row.created_at),
+        }
+        for row in rows
+    ]
+
+
+def get_comentario(comentario_id: int) -> dict | None:
+    ensure_qg_comentarios_table()
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT
+            c.id, c.origem, c.cod_parc, c.razao_social, c.cod_produto, c.nome_produto,
+            c.motivo, c.comentario, c.autor_id, u.name AS autor_nome, c.created_at
+        FROM dbo.qg_comentarios c
+        LEFT JOIN dbo.users u ON u.id = c.autor_id
+        WHERE c.id = ?
+        """,
+        [comentario_id],
+    )
+    row = cursor.fetchone()
+    cursor.close()
+    conn.close()
+    if not row:
+        return None
+    return {
+        "id": row.id,
+        "origem": row.origem,
+        "codParc": row.cod_parc,
+        "razaoSocial": row.razao_social,
+        "codProduto": row.cod_produto,
+        "nomeProduto": row.nome_produto,
+        "motivo": row.motivo,
+        "comentario": row.comentario,
+        "autorId": row.autor_id,
+        "autorNome": row.autor_nome,
+        "createdAt": _comentario_iso_datetime(row.created_at),
+    }
+
+
+def create_comentario(payload: dict, autor_id: int) -> dict:
+    ensure_qg_comentarios_table()
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        INSERT INTO dbo.qg_comentarios (
+            origem, cod_parc, razao_social, cod_produto, nome_produto, motivo, comentario, autor_id
+        )
+        OUTPUT INSERTED.id
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            payload["origem"],
+            payload.get("codParc"),
+            payload.get("razaoSocial"),
+            payload.get("codProduto"),
+            payload.get("nomeProduto"),
+            payload["motivo"],
+            payload["comentario"],
+            autor_id,
+        ],
+    )
+    new_id = cursor.fetchone()[0]
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+    return get_comentario(new_id) or {}
