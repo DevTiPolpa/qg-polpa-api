@@ -2716,6 +2716,7 @@ from app.database import (
     get_task,
     create_task,
     update_task,
+    delete_task,
 )
 
 TASK_ORIGENS_VALIDAS = ("COMPARATIVO_SEMANAL", "MOVIMENTACAO_CLIENTES_PRODUTOS", "RECORRENTES_RXO")
@@ -2825,6 +2826,24 @@ def api_update_task(task_id: int, payload: TaskUpdateRequest, request: Request):
     if not task:
         raise HTTPException(status_code=404, detail="Tarefa não encontrada")
     return task
+
+
+@app.delete("/api/tasks/{task_id}", tags=["Tarefas"])
+def api_delete_task(task_id: int, request: Request):
+    user = _require_task_user(request)
+    try:
+        atual = get_task(task_id)
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Erro ao buscar tarefa: {error}")
+    if not atual:
+        raise HTTPException(status_code=404, detail="Tarefa não encontrada")
+    if int(atual["criadoPorId"]) != int(user["id"]):
+        raise HTTPException(status_code=403, detail="Apenas quem criou a tarefa pode excluí-la.")
+    try:
+        delete_task(task_id)
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Erro ao excluir tarefa: {error}")
+    return {"ok": True}
 
 
 # =============================================================================

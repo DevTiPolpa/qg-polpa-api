@@ -6072,6 +6072,30 @@ def update_task(task_id: int, payload: dict, usuario_id: int) -> dict | None:
     return get_task(task_id)
 
 
+def delete_task(task_id: int) -> bool:
+    """Exclui a tarefa e tudo que referencia ela (histórico e notificações) —
+    ação irreversível. Autorização (só quem criou pode excluir) é validada em
+    app/main.py, antes de chamar esta função. Retorna False se a tarefa já não
+    existir. Comentários não são afetados: são amarrados ao cliente/produto,
+    não à tarefa."""
+    ensure_qg_tasks_tables()
+    ensure_qg_notifications_table()
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT 1 FROM dbo.qg_tasks WHERE id = ?", [task_id])
+    if not cursor.fetchone():
+        cursor.close()
+        conn.close()
+        return False
+    cursor.execute("DELETE FROM dbo.qg_notifications WHERE task_id = ?", [task_id])
+    cursor.execute("DELETE FROM dbo.qg_task_history WHERE task_id = ?", [task_id])
+    cursor.execute("DELETE FROM dbo.qg_tasks WHERE id = ?", [task_id])
+    conn.commit()
+    cursor.close()
+    conn.close()
+    return True
+
+
 # =============================================================================
 # Notificações — avisa o responsável quando recebe (ou é reatribuído a) uma
 # tarefa. Fase 1: só in-app, sem e-mail. Tabela criada sob demanda, mesmo
