@@ -47,8 +47,9 @@ app = FastAPI(
 
 @app.on_event("startup")
 def _iniciar_scheduler() -> None:
-    from app.scheduler import iniciar_scheduler_snapshot_semanal
+    from app.scheduler import iniciar_scheduler_snapshot_semanal, iniciar_scheduler_tarefas_vencidas
     iniciar_scheduler_snapshot_semanal()
+    iniciar_scheduler_tarefas_vencidas()
 
 
 DEFAULT_ALLOWED_ORIGINS = [

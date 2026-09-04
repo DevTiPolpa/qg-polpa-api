@@ -6078,12 +6078,18 @@ def update_task(task_id: int, payload: dict, usuario_id: int) -> dict | None:
 # padrão das demais (IF OBJECT_ID(...) IS NULL).
 # =============================================================================
 
-NOTIFICATION_TIPOS = ("TAREFA_ATRIBUIDA", "TAREFA_REATRIBUIDA")
+NOTIFICATION_TIPOS = ("TAREFA_ATRIBUIDA", "TAREFA_REATRIBUIDA", "TAREFA_VENCIDA")
 
 
 def ensure_qg_notifications_table() -> None:
+    # Cada passo roda em um cursor.execute() separado de propósito: o SQL Server faz
+    # resolução de nomes antecipada dentro de um único lote, então um ALTER TABLE ADD
+    # COLUMN e uma instrução no MESMO lote que referencia essa coluna nova (ex.: o
+    # CREATE INDEX de dedupe_key) falha com "nome de coluna inválido" — precisam estar
+    # em lotes distintos.
     with get_connection() as connection:
         cursor = connection.cursor()
+
         cursor.execute(
             """
             IF OBJECT_ID('dbo.qg_notifications', 'U') IS NULL
@@ -6092,21 +6098,73 @@ def ensure_qg_notifications_table() -> None:
                     id           INT IDENTITY(1,1) NOT NULL PRIMARY KEY,
                     usuario_id   INT NOT NULL REFERENCES dbo.users(id),
                     tipo         NVARCHAR(30) NOT NULL
-                                 CONSTRAINT CK_qg_notifications_tipo CHECK (tipo IN ('TAREFA_ATRIBUIDA','TAREFA_REATRIBUIDA')),
+                                 CONSTRAINT CK_qg_notifications_tipo CHECK (tipo IN ('TAREFA_ATRIBUIDA','TAREFA_REATRIBUIDA','TAREFA_VENCIDA')),
                     task_id      INT NOT NULL REFERENCES dbo.qg_tasks(id),
                     titulo       NVARCHAR(200) NOT NULL,
                     mensagem     NVARCHAR(500) NOT NULL,
                     lida         BIT NOT NULL CONSTRAINT DF_qg_notifications_lida DEFAULT 0,
+                    -- Só preenchido para TAREFA_VENCIDA: "vencida:{task_id}:{prazo}", com índice
+                    -- único, garante que a checagem periódica nunca gere duplicata mesmo se
+                    -- dev e produção rodarem a varredura ao mesmo tempo (mesmo banco compartilhado).
+                    dedupe_key   NVARCHAR(100) NULL,
                     created_at   DATETIME2 NOT NULL CONSTRAINT DF_qg_notifications_created_at DEFAULT SYSUTCDATETIME()
                 );
             END;
+            """
+        )
+        connection.commit()
 
+        cursor.execute(
+            """
             IF NOT EXISTS (
                 SELECT 1 FROM sys.indexes
                 WHERE name = 'IX_qg_notifications_usuario' AND object_id = OBJECT_ID('dbo.qg_notifications')
             )
             BEGIN
                 CREATE INDEX IX_qg_notifications_usuario ON dbo.qg_notifications (usuario_id, lida, created_at DESC);
+            END;
+            """
+        )
+        connection.commit()
+
+        # Migração idempotente para quando a tabela já existia antes de dedupe_key existir
+        # (mesmo padrão usado em qg_task_history).
+        cursor.execute(
+            """
+            IF NOT EXISTS (
+                SELECT 1 FROM sys.columns
+                WHERE object_id = OBJECT_ID('dbo.qg_notifications') AND name = 'dedupe_key'
+            )
+            BEGIN
+                ALTER TABLE dbo.qg_notifications ADD dedupe_key NVARCHAR(100) NULL;
+            END;
+            """
+        )
+        connection.commit()
+
+        cursor.execute(
+            """
+            IF NOT EXISTS (
+                SELECT 1 FROM sys.indexes
+                WHERE name = 'UX_qg_notifications_dedupe' AND object_id = OBJECT_ID('dbo.qg_notifications')
+            )
+            BEGIN
+                CREATE UNIQUE INDEX UX_qg_notifications_dedupe ON dbo.qg_notifications (dedupe_key) WHERE dedupe_key IS NOT NULL;
+            END;
+            """
+        )
+        connection.commit()
+
+        cursor.execute(
+            """
+            IF EXISTS (
+                SELECT 1 FROM sys.check_constraints
+                WHERE name = 'CK_qg_notifications_tipo' AND definition NOT LIKE '%TAREFA_VENCIDA%'
+            )
+            BEGIN
+                ALTER TABLE dbo.qg_notifications DROP CONSTRAINT CK_qg_notifications_tipo;
+                ALTER TABLE dbo.qg_notifications ADD CONSTRAINT CK_qg_notifications_tipo
+                    CHECK (tipo IN ('TAREFA_ATRIBUIDA','TAREFA_REATRIBUIDA','TAREFA_VENCIDA'));
             END;
             """
         )
@@ -6140,6 +6198,65 @@ def _insert_notificacao_tarefa(
         """,
         [usuario_id, tipo, task_id, titulo, mensagem],
     )
+
+
+def _formatar_prazo_br(prazo_iso: str | None) -> str:
+    if not prazo_iso:
+        return "-"
+    partes = prazo_iso.split("-")
+    if len(partes) != 3:
+        return prazo_iso
+    ano, mes, dia = partes
+    return f"{dia}/{mes}/{ano}"
+
+
+def notificar_tarefas_vencidas() -> int:
+    """Varredura periódica (chamada pela thread em app/scheduler.py): gera uma
+    notificação pro responsável de cada tarefa que passou do prazo e ainda não
+    foi concluída. Deduplicado por (task_id, prazo) via `dedupe_key` com índice
+    único — só avisa uma vez por prazo; se o prazo for alterado depois, uma
+    nova notificação é gerada quando ela vencer de novo. Retorna quantas
+    notificações novas foram criadas nesta execução."""
+    ensure_qg_tasks_tables()
+    ensure_qg_notifications_table()
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT id, origem, razao_social, tipo_ocorrencia, prazo, responsavel_id
+        FROM dbo.qg_tasks
+        WHERE status != 'CONCLUIDA' AND prazo < CAST(SYSUTCDATETIME() AS DATE)
+        """
+    )
+    vencidas = cursor.fetchall()
+
+    criadas = 0
+    for row in vencidas:
+        prazo_iso = _task_iso_date(row.prazo)
+        dedupe_key = f"vencida:{row.id}:{prazo_iso}"
+        mensagem = " · ".join(filter(None, [
+            TASK_ORIGEM_LABEL.get(row.origem, row.origem),
+            row.razao_social,
+            row.tipo_ocorrencia,
+            f"Prazo: {_formatar_prazo_br(prazo_iso)}",
+        ]))
+        try:
+            cursor.execute(
+                """
+                INSERT INTO dbo.qg_notifications (usuario_id, tipo, task_id, titulo, mensagem, dedupe_key)
+                VALUES (?, 'TAREFA_VENCIDA', ?, ?, ?, ?)
+                """,
+                [row.responsavel_id, row.id, "Tarefa vencida", mensagem, dedupe_key],
+            )
+            conn.commit()
+            criadas += 1
+        except Exception:
+            # dedupe_key já existe (índice único) — essa tarefa/prazo já foi notificada.
+            conn.rollback()
+
+    cursor.close()
+    conn.close()
+    return criadas
 
 
 def list_notifications(usuario_id: int, apenas_nao_lidas: bool = False, limite: int = 30) -> list[dict]:
