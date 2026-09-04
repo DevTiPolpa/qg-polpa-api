@@ -5676,6 +5676,13 @@ def get_movimentacao_produto_clientes(
 TASK_ORIGENS = ("COMPARATIVO_SEMANAL", "MOVIMENTACAO_CLIENTES_PRODUTOS", "RECORRENTES_RXO")
 TASK_STATUSES = ("PENDENTE", "EM_ANALISE", "AGUARDANDO_RETORNO", "CONCLUIDA")
 
+# Espelha lib/tarefas.ts (ORIGEM_LABEL) — usado só para compor o texto das notificações.
+TASK_ORIGEM_LABEL = {
+    "COMPARATIVO_SEMANAL": "Comparativo Semanal",
+    "MOVIMENTACAO_CLIENTES_PRODUTOS": "Movimentação de Clientes e Produtos",
+    "RECORRENTES_RXO": "Recorrentes R x O",
+}
+
 _TASK_UPDATABLE_FIELDS = {
     # payload key -> (coluna, tipo_evento no histórico, chave equivalente no dict serializado)
     "responsavelId": ("responsavel_id", "RESPONSAVEL", "responsavelId"),
@@ -5935,6 +5942,7 @@ def create_task(payload: dict, criado_por_id: int) -> dict:
     """Cria uma tarefa (sempre uma ação manual do usuário numa das 3 telas de
     origem) e grava o primeiro evento de histórico (CRIACAO)."""
     ensure_qg_tasks_tables()
+    ensure_qg_notifications_table()
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute(
@@ -5970,6 +5978,21 @@ def create_task(payload: dict, criado_por_id: int) -> dict:
         """,
         [new_id, f"status PENDENTE · prazo {payload['prazo']}", criado_por_id],
     )
+
+    # Notifica o responsável, exceto quando a própria pessoa que criou já é a
+    # responsável (não faz sentido notificar alguém de algo que ela mesma fez).
+    if int(payload["responsavelId"]) != int(criado_por_id):
+        _insert_notificacao_tarefa(
+            cursor,
+            usuario_id=payload["responsavelId"],
+            tipo="TAREFA_ATRIBUIDA",
+            task_id=new_id,
+            titulo="Nova tarefa atribuída a você",
+            origem=payload["origem"],
+            razao_social=payload.get("razaoSocial"),
+            tipo_ocorrencia=payload["tipoOcorrencia"],
+        )
+
     conn.commit()
     cursor.close()
     conn.close()
@@ -5981,6 +6004,7 @@ def update_task(task_id: int, payload: dict, usuario_id: int) -> dict | None:
     """Atualização parcial de responsável/prazo/status/causa/ações. Só grava
     histórico dos campos que efetivamente mudaram de valor."""
     ensure_qg_tasks_tables()
+    ensure_qg_notifications_table()
     current = get_task(task_id)
     if not current:
         return None
@@ -5988,6 +6012,7 @@ def update_task(task_id: int, payload: dict, usuario_id: int) -> dict | None:
     sets: list[str] = []
     params: list[Any] = []
     history_rows: list[tuple[str, str | None, str | None]] = []
+    novo_responsavel_id: int | None = None
 
     for field, (column, evento, current_key) in _TASK_UPDATABLE_FIELDS.items():
         if field not in payload:
@@ -6003,6 +6028,8 @@ def update_task(task_id: int, payload: dict, usuario_id: int) -> dict | None:
             None if old_value is None else str(old_value),
             None if new_value is None else str(new_value),
         ))
+        if field == "responsavelId":
+            novo_responsavel_id = new_value
 
     if not sets:
         return current
@@ -6021,11 +6048,172 @@ def update_task(task_id: int, payload: dict, usuario_id: int) -> dict | None:
             """,
             [task_id, evento, old_value, new_value, usuario_id],
         )
+
+    # Notifica o novo responsável — exceto quando a própria pessoa que fez a
+    # reatribuição é quem virou a nova responsável (também não notifica quando
+    # o novo responsável é o mesmo de quem chamou o update, mesma regra de
+    # create_task: não notifica alguém de algo que ela mesma fez).
+    if novo_responsavel_id is not None and int(novo_responsavel_id) != int(usuario_id):
+        _insert_notificacao_tarefa(
+            cursor,
+            usuario_id=novo_responsavel_id,
+            tipo="TAREFA_REATRIBUIDA",
+            task_id=task_id,
+            titulo="Tarefa reatribuída para você",
+            origem=current["origem"],
+            razao_social=current.get("razaoSocial"),
+            tipo_ocorrencia=payload.get("tipoOcorrencia", current.get("tipoOcorrencia")),
+        )
+
     conn.commit()
     cursor.close()
     conn.close()
 
     return get_task(task_id)
+
+
+# =============================================================================
+# Notificações — avisa o responsável quando recebe (ou é reatribuído a) uma
+# tarefa. Fase 1: só in-app, sem e-mail. Tabela criada sob demanda, mesmo
+# padrão das demais (IF OBJECT_ID(...) IS NULL).
+# =============================================================================
+
+NOTIFICATION_TIPOS = ("TAREFA_ATRIBUIDA", "TAREFA_REATRIBUIDA")
+
+
+def ensure_qg_notifications_table() -> None:
+    with get_connection() as connection:
+        cursor = connection.cursor()
+        cursor.execute(
+            """
+            IF OBJECT_ID('dbo.qg_notifications', 'U') IS NULL
+            BEGIN
+                CREATE TABLE dbo.qg_notifications (
+                    id           INT IDENTITY(1,1) NOT NULL PRIMARY KEY,
+                    usuario_id   INT NOT NULL REFERENCES dbo.users(id),
+                    tipo         NVARCHAR(30) NOT NULL
+                                 CONSTRAINT CK_qg_notifications_tipo CHECK (tipo IN ('TAREFA_ATRIBUIDA','TAREFA_REATRIBUIDA')),
+                    task_id      INT NOT NULL REFERENCES dbo.qg_tasks(id),
+                    titulo       NVARCHAR(200) NOT NULL,
+                    mensagem     NVARCHAR(500) NOT NULL,
+                    lida         BIT NOT NULL CONSTRAINT DF_qg_notifications_lida DEFAULT 0,
+                    created_at   DATETIME2 NOT NULL CONSTRAINT DF_qg_notifications_created_at DEFAULT SYSUTCDATETIME()
+                );
+            END;
+
+            IF NOT EXISTS (
+                SELECT 1 FROM sys.indexes
+                WHERE name = 'IX_qg_notifications_usuario' AND object_id = OBJECT_ID('dbo.qg_notifications')
+            )
+            BEGIN
+                CREATE INDEX IX_qg_notifications_usuario ON dbo.qg_notifications (usuario_id, lida, created_at DESC);
+            END;
+            """
+        )
+        connection.commit()
+
+
+def _insert_notificacao_tarefa(
+    cursor: Any,
+    *,
+    usuario_id: int,
+    tipo: str,
+    task_id: int,
+    titulo: str,
+    origem: str,
+    razao_social: str | None,
+    tipo_ocorrencia: str | None,
+) -> None:
+    """Grava a notificação usando o MESMO cursor/transação da criação ou
+    atualização da tarefa — se o INSERT da tarefa falhar, a notificação
+    também não é gravada (nada de commit aqui, quem chama decide)."""
+    partes = [TASK_ORIGEM_LABEL.get(origem, origem)]
+    if razao_social:
+        partes.append(razao_social)
+    if tipo_ocorrencia:
+        partes.append(tipo_ocorrencia)
+    mensagem = " · ".join(partes)
+    cursor.execute(
+        """
+        INSERT INTO dbo.qg_notifications (usuario_id, tipo, task_id, titulo, mensagem)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        [usuario_id, tipo, task_id, titulo, mensagem],
+    )
+
+
+def list_notifications(usuario_id: int, apenas_nao_lidas: bool = False, limite: int = 30) -> list[dict]:
+    ensure_qg_notifications_table()
+    conn = get_connection()
+    cursor = conn.cursor()
+    where = "usuario_id = ?"
+    params: list[Any] = [usuario_id]
+    if apenas_nao_lidas:
+        where += " AND lida = 0"
+    cursor.execute(
+        f"""
+        SELECT TOP {int(limite)} id, tipo, task_id, titulo, mensagem, lida, created_at
+        FROM dbo.qg_notifications
+        WHERE {where}
+        ORDER BY created_at DESC
+        """,
+        params,
+    )
+    rows = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    return [
+        {
+            "id": r.id,
+            "tipo": r.tipo,
+            "taskId": r.task_id,
+            "titulo": r.titulo,
+            "mensagem": r.mensagem,
+            "lida": bool(r.lida),
+            "createdAt": _task_iso_datetime(r.created_at),
+        }
+        for r in rows
+    ]
+
+
+def count_notificacoes_nao_lidas(usuario_id: int) -> int:
+    ensure_qg_notifications_table()
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM dbo.qg_notifications WHERE usuario_id = ? AND lida = 0", [usuario_id])
+    (count,) = cursor.fetchone()
+    cursor.close()
+    conn.close()
+    return int(count)
+
+
+def marcar_notificacao_lida(notification_id: int, usuario_id: int) -> bool:
+    """Marca como lida — só se a notificação pertencer ao próprio usuário
+    (evita marcar/ler a notificação de outra pessoa via id)."""
+    ensure_qg_notifications_table()
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "UPDATE dbo.qg_notifications SET lida = 1 WHERE id = ? AND usuario_id = ?",
+        [notification_id, usuario_id],
+    )
+    afetadas = cursor.rowcount
+    conn.commit()
+    cursor.close()
+    conn.close()
+    return afetadas > 0
+
+
+def marcar_todas_notificacoes_lidas(usuario_id: int) -> int:
+    ensure_qg_notifications_table()
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE dbo.qg_notifications SET lida = 1 WHERE usuario_id = ? AND lida = 0", [usuario_id])
+    afetadas = cursor.rowcount
+    conn.commit()
+    cursor.close()
+    conn.close()
+    return afetadas
 
 
 # =============================================================================

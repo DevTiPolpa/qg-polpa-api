@@ -2827,6 +2827,60 @@ def api_update_task(task_id: int, payload: TaskUpdateRequest, request: Request):
 
 
 # =============================================================================
+# Notificações — avisa o responsável quando recebe (ou é reatribuído a) uma
+# tarefa. Sempre restrito ao próprio usuário logado (nunca aceita usuarioId
+# vindo do cliente).
+# =============================================================================
+
+from app.database import (
+    list_notifications,
+    count_notificacoes_nao_lidas,
+    marcar_notificacao_lida,
+    marcar_todas_notificacoes_lidas,
+)
+
+
+@app.get("/api/notifications", tags=["Notificações"])
+def api_list_notifications(request: Request, apenasNaoLidas: bool = Query(default=False)):
+    user = _require_task_user(request)
+    try:
+        return list_notifications(int(user["id"]), apenas_nao_lidas=apenasNaoLidas)
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Erro ao listar notificações: {error}")
+
+
+@app.get("/api/notifications/count", tags=["Notificações"])
+def api_count_notifications(request: Request):
+    user = _require_task_user(request)
+    try:
+        return {"naoLidas": count_notificacoes_nao_lidas(int(user["id"]))}
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Erro ao contar notificações: {error}")
+
+
+@app.patch("/api/notifications/{notification_id}/lida", tags=["Notificações"])
+def api_marcar_notificacao_lida(notification_id: int, request: Request):
+    user = _require_task_user(request)
+    try:
+        ok = marcar_notificacao_lida(notification_id, int(user["id"]))
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Erro ao marcar notificação: {error}")
+    if not ok:
+        raise HTTPException(status_code=404, detail="Notificação não encontrada")
+    return {"ok": True}
+
+
+@app.post("/api/notifications/marcar-todas-lidas", tags=["Notificações"])
+def api_marcar_todas_lidas(request: Request):
+    user = _require_task_user(request)
+    try:
+        marcadas = marcar_todas_notificacoes_lidas(int(user["id"]))
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Erro ao marcar notificações: {error}")
+    return {"marcadas": marcadas}
+
+
+# =============================================================================
 # Comentários — histórico de anotações por linha nas 3 telas de análise
 # =============================================================================
 
