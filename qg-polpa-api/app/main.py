@@ -1203,8 +1203,8 @@ def api_dashboard_original_cliente_mix(
 
 
 @app.get("/api/dashboard-original/filtros-disponiveis")
-def api_dashboard_original_filtros_disponiveis():
-    return get_dashboard_original_filtros_disponiveis()
+def api_dashboard_original_filtros_disponiveis(apenasMercadosPermitidos: bool = Query(default=False)):
+    return get_dashboard_original_filtros_disponiveis(apenas_mercados_permitidos=apenasMercadosPermitidos)
 
 
 # ============================================================
@@ -2945,3 +2945,43 @@ def api_create_comentario(payload: ComentarioCreateRequest, request: Request):
         return create_comentario(payload.model_dump(), int(user["id"]))
     except Exception as error:
         raise HTTPException(status_code=500, detail=f"Erro ao criar comentário: {error}")
+
+
+# =============================================================================
+# Visão Global Polpa Brasil — Orçado x Realizado por Mercado de Vendas, SEM
+# filtro/restrição de mercado (propositalmente diferente das 6 telas com
+# MERCADOS_PERMITIDOS_DASHBOARD).
+# =============================================================================
+
+from app.database import (
+    get_visao_global_resumo,
+    get_visao_global_filtros_disponiveis,
+)
+
+
+@app.get("/api/visao-global/filtros-disponiveis", tags=["Visão Global"])
+def api_visao_global_filtros_disponiveis():
+    try:
+        return get_visao_global_filtros_disponiveis()
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Erro ao buscar filtros disponíveis: {error}")
+
+
+@app.get("/api/visao-global/resumo", tags=["Visão Global"])
+def api_visao_global_resumo(
+    ano: int | None = Query(default=None),
+    meses: list[int] | None = Query(default=None),
+    codProdutos: list[int] | None = Query(default=None),
+    gruposProduto: list[str] | None = Query(default=None),
+    tipoReceita: str | None = Query(default=None),
+    mercados: list[str] | None = Query(default=None),
+    projetos: list[str] | None = Query(default=None),
+):
+    filtros = {
+        "ano": ano, "meses": meses, "codProdutos": codProdutos, "gruposProduto": gruposProduto,
+        "tipoReceita": tipoReceita, "mercados": mercados, "projetos": projetos,
+    }
+    try:
+        return get_visao_global_resumo(filtros)
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Erro ao buscar visão global: {error}")

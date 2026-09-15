@@ -505,6 +505,27 @@ def _int(value: Any) -> int:
     return int(value or 0)
 
 
+# Restrição fixa de mercados para as 6 telas "originais" (Dashboard, Histórico
+# Clientes, Novos Projetos, Recorrentes R x O, Comparativo Semanal, Por Vendedor):
+# elas nunca devem mostrar dados de Mercado Público / Varejo / E-commerce Varejo,
+# só os 3 mercados abaixo. Valores exatamente como gravados em dbo.fato_vendas.mercado_vendas
+# (tudo maiúsculo, sem acento em "PUBLICO"). Movimentação de Clientes e Produtos e
+# demais telas NÃO usam essa constante — continuam vendo os 6 mercados normalmente.
+MERCADOS_PERMITIDOS_DASHBOARD = ("NACIONAL", "EXPORTAÇÃO", "E-COMMERCE INDUSTRIAL")
+
+
+def _restringir_mercados_permitidos(mercados: list[str]) -> list[str]:
+    """Aplica MERCADOS_PERMITIDOS_DASHBOARD sobre uma lista de mercados já
+    selecionada pelo usuário: sem seleção (lista vazia) -> os 3 permitidos;
+    seleção válida -> só a interseção; seleção só com mercados fora da lista
+    (ex.: alguém forçando via URL) -> cai nos 3 permitidos em vez de ficar
+    vazia (lista vazia downstream significa "sem filtro" = mostraria tudo)."""
+    if not mercados:
+        return list(MERCADOS_PERMITIDOS_DASHBOARD)
+    filtrados = [m for m in mercados if m.upper() in MERCADOS_PERMITIDOS_DASHBOARD]
+    return filtrados if filtrados else list(MERCADOS_PERMITIDOS_DASHBOARD)
+
+
 def _split_filter(value: str | list[str] | tuple[str, ...] | None) -> list[str]:
     if value is None:
         return []
@@ -557,9 +578,11 @@ def _split_int_filter(value: int | str | list | tuple | None) -> list[int]:
 
 
 def _normalize_filtros(filtros: dict | None) -> dict:
+    """Usada por Por Vendedor, Recorrentes R x O e Comparativo Semanal — as 3
+    telas restritas aos mercados de MERCADOS_PERMITIDOS_DASHBOARD."""
     filtros = filtros or {}
     return {
-        "mercados": _split_filter(filtros.get("mercados") or filtros.get("mercado")),
+        "mercados": _restringir_mercados_permitidos(_split_filter(filtros.get("mercados") or filtros.get("mercado"))),
         "vendedores": _split_filter(filtros.get("vendedores") or filtros.get("vendedor")),
         "projetos": _split_filter(filtros.get("projetos") or filtros.get("projeto")),
         "gruposProduto": _split_filter(filtros.get("gruposProduto") or filtros.get("grupoProduto")),
@@ -573,6 +596,18 @@ def _normalize_filtros(filtros: dict | None) -> dict:
         "codProdutos": _split_int_filter(filtros.get("codProdutos") or filtros.get("codProduto")),
         "uf": filtros.get("uf"),
     }
+
+
+# Tops (Tipo de Operação) que representam bonificação (mercadoria dada/devolvida
+# de graça, não venda de fato) — desconsiderados de toda soma de vendas do
+# sistema, tanto o lado de saída quanto o de devolução da bonificação.
+TOPS_EXCLUIDOS_DA_VENDA = (
+    "PEDIDO DE VENDA - BONIFICAÇÃO",
+    "VENDA NF-E + BONIFICAÇÃO",
+    "DEV PROPRIA - DE REMESSA EM BONIFICAÇÃO",  # grafia exata da base, sem acento no "O"
+    "DEVOLUÇÃO DE REMESSA EM BONIFICAÇÃO",
+    "REMESSA DE BONIFICAÇÃO - SAIDA",  # grafia exata da base, sem acento no "I"
+)
 
 
 def build_fato_vendas_where(filtros: dict | None, alias: str = "fv") -> tuple[str, list[Any]]:
@@ -619,6 +654,11 @@ def build_fato_vendas_where(filtros: dict | None, alias: str = "fv") -> tuple[st
 
     parts.append(f"({alias}.cod_top IS NULL OR {alias}.cod_top != 1023)")
     parts.append(f"({alias}.[top] IS NULL OR {alias}.[top] NOT LIKE '%ESTOQUE MINIM%')")
+    parts.append(
+        f"({alias}.[top] IS NULL OR {alias}.[top] NOT IN "
+        f"({', '.join('?' for _ in TOPS_EXCLUIDOS_DA_VENDA)}))"
+    )
+    params.extend(TOPS_EXCLUIDOS_DA_VENDA)
 
     return "WHERE " + " AND ".join(parts), params
 
@@ -1176,9 +1216,10 @@ def _dash_build_in_clause(column: str, values: list[str], params: list[Any]) -> 
 
 
 def _dash_normalize_filtros(filtros: dict | None) -> dict:
+    """Dashboard está restrito aos mercados de MERCADOS_PERMITIDOS_DASHBOARD."""
     filtros = filtros or {}
     return {
-        "mercados": _dash_split_filter(filtros.get("mercados") or filtros.get("mercado")),
+        "mercados": _restringir_mercados_permitidos(_dash_split_filter(filtros.get("mercados") or filtros.get("mercado"))),
         "vendedores": _dash_split_filter(filtros.get("vendedores") or filtros.get("vendedor")),
         "projetos": _dash_split_filter(filtros.get("projetos") or filtros.get("projeto")),
         "gruposProduto": _dash_split_filter(filtros.get("gruposProduto") or filtros.get("grupoProduto")),
@@ -1239,6 +1280,11 @@ def _dash_build_fato_where(filtros: dict | None, alias: str = "fv", ignore_tipo_
 
     parts.append(f"({alias}.cod_top IS NULL OR {alias}.cod_top != 1023)")
     parts.append(f"({alias}.[top] IS NULL OR {alias}.[top] NOT LIKE '%ESTOQUE MINIM%')")
+    parts.append(
+        f"({alias}.[top] IS NULL OR {alias}.[top] NOT IN "
+        f"({', '.join('?' for _ in TOPS_EXCLUIDOS_DA_VENDA)}))"
+    )
+    params.extend(TOPS_EXCLUIDOS_DA_VENDA)
 
     return "WHERE " + " AND ".join(parts), params
 
@@ -1815,12 +1861,19 @@ def list_dashboard_original_regiao_mix(regiao: str, filtros: dict | None = None)
     ]
 
 
-def get_dashboard_original_filtros_disponiveis() -> dict:
+def get_dashboard_original_filtros_disponiveis(apenas_mercados_permitidos: bool = False) -> dict:
+    """`apenas_mercados_permitidos=True` restringe a lista de mercados retornada
+    (usada para popular o multi-select) a MERCADOS_PERMITIDOS_DASHBOARD — usado
+    pelas 6 telas restritas via FiltrosGlobais. Movimentação de Clientes e
+    Produtos chama esta mesma função com o padrão (False) e continua vendo os
+    6 mercados normalmente."""
     conn = get_connection()
     cursor = conn.cursor()
     try:
         cursor.execute("SELECT DISTINCT mercado_vendas AS value FROM dbo.fato_vendas WHERE mercado_vendas IS NOT NULL ORDER BY mercado_vendas")
         mercados = [row.value for row in cursor.fetchall() if row.value]
+        if apenas_mercados_permitidos:
+            mercados = [m for m in mercados if m.upper() in MERCADOS_PERMITIDOS_DASHBOARD]
         cursor.execute("SELECT DISTINCT nome_vendedor AS value FROM dbo.fato_vendas WHERE nome_vendedor IS NOT NULL ORDER BY nome_vendedor")
         vendedores = [row.value for row in cursor.fetchall() if row.value]
         cursor.execute("SELECT DISTINCT projeto AS value FROM dbo.fato_vendas WHERE projeto IS NOT NULL ORDER BY projeto")
@@ -1937,9 +1990,10 @@ def _np_build_in_clause(column: str, values: list[str], params: list[Any]) -> st
 
 
 def _np_normalize_filtros(filtros: dict | None) -> dict:
+    """Novos Projetos está restrito aos mercados de MERCADOS_PERMITIDOS_DASHBOARD."""
     filtros = filtros or {}
     return {
-        "mercados": _np_split_filter(filtros.get("mercados") or filtros.get("mercado")),
+        "mercados": _restringir_mercados_permitidos(_np_split_filter(filtros.get("mercados") or filtros.get("mercado"))),
         "vendedores": _np_split_filter(filtros.get("vendedores") or filtros.get("vendedor")),
         # A página Novos Projetos força a fonte para NOVOS PROJETOS/TESTE INDUSTRIAL.
         # Portanto, não aplicamos filtros["projetos"] para não esvaziar a base.
@@ -2002,6 +2056,11 @@ def _np_build_fato_where(filtros: dict | None, alias: str = "fv", include_date: 
     parts.append(f"{alias}.projeto IN ('NOVOS PROJETOS', 'TESTE INDUSTRIAL')")
     parts.append(f"({alias}.cod_top IS NULL OR {alias}.cod_top != 1023)")
     parts.append(f"({alias}.[top] IS NULL OR {alias}.[top] NOT LIKE '%ESTOQUE MINIM%')")
+    parts.append(
+        f"({alias}.[top] IS NULL OR {alias}.[top] NOT IN "
+        f"({', '.join('?' for _ in TOPS_EXCLUIDOS_DA_VENDA)}))"
+    )
+    params.extend(TOPS_EXCLUIDOS_DA_VENDA)
 
     return "WHERE " + " AND ".join(parts), params
 
@@ -2034,6 +2093,7 @@ WITH primeiros AS (
       AND dt_entrega_cliente IS NOT NULL
       AND (cod_top IS NULL OR cod_top != 1023)
       AND ([top] IS NULL OR [top] NOT LIKE '%ESTOQUE MINIM%')
+      AND ([top] IS NULL OR [top] NOT IN ('PEDIDO DE VENDA - BONIFICAÇÃO', 'VENDA NF-E + BONIFICAÇÃO', 'DEV PROPRIA - DE REMESSA EM BONIFICAÇÃO', 'DEVOLUÇÃO DE REMESSA EM BONIFICAÇÃO', 'REMESSA DE BONIFICAÇÃO - SAIDA'))
     GROUP BY cod_parc, cod_produto
 )
 """
@@ -2404,6 +2464,7 @@ def _hc_str_list(value):
 
 
 def _hc_normalize_filtros(filtros: dict | None = None) -> dict:
+    """Histórico Clientes está restrito aos mercados de MERCADOS_PERMITIDOS_DASHBOARD."""
     filtros = filtros or {}
     current_year = datetime.now().year
     data_inicio = filtros.get("dataInicio")
@@ -2417,7 +2478,7 @@ def _hc_normalize_filtros(filtros: dict | None = None) -> dict:
         "dataInicio": data_inicio,
         "dataFim": data_fim,
         "codParcs": _hc_int_list(filtros.get("codParcs")),
-        "mercados": _hc_str_list(filtros.get("mercados")),
+        "mercados": _restringir_mercados_permitidos(_hc_str_list(filtros.get("mercados"))),
         "gruposProduto": _hc_str_list(filtros.get("gruposProduto")),
         "vendedores": _hc_str_list(filtros.get("vendedores")),
         "ufs": _hc_str_list(filtros.get("ufs")),
@@ -2442,6 +2503,9 @@ def _hc_build_where(filtros: dict | None = None, alias: str = "fv") -> tuple[str
         f"{alias}.tipo_receita IN ('VENDA_FIRME', 'DEVOLUCAO')",
         f"({alias}.cod_top IS NULL OR {alias}.cod_top != 1023)",
         f"({alias}.[top] IS NULL OR {alias}.[top] NOT LIKE '%ESTOQUE MINIM%')",
+        f"({alias}.[top] IS NULL OR {alias}.[top] NOT IN "
+        "('PEDIDO DE VENDA - BONIFICAÇÃO', 'VENDA NF-E + BONIFICAÇÃO', "
+        "'DEV PROPRIA - DE REMESSA EM BONIFICAÇÃO', 'DEVOLUÇÃO DE REMESSA EM BONIFICAÇÃO', 'REMESSA DE BONIFICAÇÃO - SAIDA'))",
         f"{alias}.dt_entrega_cliente IS NOT NULL",
     ]
     params: list = []
@@ -2507,6 +2571,7 @@ def get_historico_clientes_filtros() -> dict:
           AND tipo_receita IN ('VENDA_FIRME','DEVOLUCAO')
           AND (cod_top IS NULL OR cod_top != 1023)
           AND ([top] IS NULL OR [top] NOT LIKE '%ESTOQUE MINIM%')
+          AND ([top] IS NULL OR [top] NOT IN ('PEDIDO DE VENDA - BONIFICAÇÃO', 'VENDA NF-E + BONIFICAÇÃO', 'DEV PROPRIA - DE REMESSA EM BONIFICAÇÃO', 'DEVOLUÇÃO DE REMESSA EM BONIFICAÇÃO', 'REMESSA DE BONIFICAÇÃO - SAIDA'))
         ORDER BY ano DESC
         """
     )
@@ -2520,6 +2585,7 @@ def get_historico_clientes_filtros() -> dict:
         WHERE fv.tipo_receita IN ('VENDA_FIRME','DEVOLUCAO')
           AND (fv.cod_top IS NULL OR fv.cod_top != 1023)
           AND (fv.[top] IS NULL OR fv.[top] NOT LIKE '%ESTOQUE MINIM%')
+          AND (fv.[top] IS NULL OR fv.[top] NOT IN ('PEDIDO DE VENDA - BONIFICAÇÃO', 'VENDA NF-E + BONIFICAÇÃO', 'DEV PROPRIA - DE REMESSA EM BONIFICAÇÃO', 'DEVOLUÇÃO DE REMESSA EM BONIFICAÇÃO', 'REMESSA DE BONIFICAÇÃO - SAIDA'))
         GROUP BY fv.cod_parc
         ORDER BY razaoSocial
         """
@@ -2532,6 +2598,7 @@ def get_historico_clientes_filtros() -> dict:
           AND tipo_receita IN ('VENDA_FIRME','DEVOLUCAO')
           AND (cod_top IS NULL OR cod_top != 1023)
           AND ([top] IS NULL OR [top] NOT LIKE '%ESTOQUE MINIM%')
+          AND ([top] IS NULL OR [top] NOT IN ('PEDIDO DE VENDA - BONIFICAÇÃO', 'VENDA NF-E + BONIFICAÇÃO', 'DEV PROPRIA - DE REMESSA EM BONIFICAÇÃO', 'DEVOLUÇÃO DE REMESSA EM BONIFICAÇÃO', 'REMESSA DE BONIFICAÇÃO - SAIDA'))
         ORDER BY mercado
         """
     )
@@ -2543,6 +2610,7 @@ def get_historico_clientes_filtros() -> dict:
           AND tipo_receita IN ('VENDA_FIRME','DEVOLUCAO')
           AND (cod_top IS NULL OR cod_top != 1023)
           AND ([top] IS NULL OR [top] NOT LIKE '%ESTOQUE MINIM%')
+          AND ([top] IS NULL OR [top] NOT IN ('PEDIDO DE VENDA - BONIFICAÇÃO', 'VENDA NF-E + BONIFICAÇÃO', 'DEV PROPRIA - DE REMESSA EM BONIFICAÇÃO', 'DEVOLUÇÃO DE REMESSA EM BONIFICAÇÃO', 'REMESSA DE BONIFICAÇÃO - SAIDA'))
         ORDER BY grupo
         """
     )
@@ -2554,6 +2622,7 @@ def get_historico_clientes_filtros() -> dict:
           AND tipo_receita IN ('VENDA_FIRME','DEVOLUCAO')
           AND (cod_top IS NULL OR cod_top != 1023)
           AND ([top] IS NULL OR [top] NOT LIKE '%ESTOQUE MINIM%')
+          AND ([top] IS NULL OR [top] NOT IN ('PEDIDO DE VENDA - BONIFICAÇÃO', 'VENDA NF-E + BONIFICAÇÃO', 'DEV PROPRIA - DE REMESSA EM BONIFICAÇÃO', 'DEVOLUÇÃO DE REMESSA EM BONIFICAÇÃO', 'REMESSA DE BONIFICAÇÃO - SAIDA'))
         ORDER BY vendedor
         """
     )
@@ -3131,6 +3200,7 @@ def criar_forecast_snapshot() -> dict:
         LEFT JOIN dbo.dim_produto dp ON fv.cod_produto = dp.cod_produto
         WHERE (fv.cod_top IS NULL OR fv.cod_top != 1023)
           AND (fv.[top] IS NULL OR fv.[top] NOT LIKE '%ESTOQUE MINIM%')
+          AND (fv.[top] IS NULL OR fv.[top] NOT IN ('PEDIDO DE VENDA - BONIFICAÇÃO', 'VENDA NF-E + BONIFICAÇÃO', 'DEV PROPRIA - DE REMESSA EM BONIFICAÇÃO', 'DEVOLUÇÃO DE REMESSA EM BONIFICAÇÃO', 'REMESSA DE BONIFICAÇÃO - SAIDA'))
         GROUP BY fv.cod_parc, dc.razao_social, fv.RAZAOSOCIAL, fv.cod_produto,
                  dp.nome_produto, fv.nome_produto, fv.grupo_produto, fv.projeto,
                  fv.mercado_vendas, fv.nome_vendedor, fv.tipo_receita, fv.uf,
@@ -3156,6 +3226,9 @@ def _build_recorrentes_real_where(filtros: dict | None, alias: str = "fv") -> tu
         f"{alias}.projeto = 'RECORRENTES'",
         f"({alias}.cod_top IS NULL OR {alias}.cod_top != 1023)",
         f"({alias}.[top] IS NULL OR {alias}.[top] NOT LIKE '%ESTOQUE MINIM%')",
+        f"({alias}.[top] IS NULL OR {alias}.[top] NOT IN "
+        "('PEDIDO DE VENDA - BONIFICAÇÃO', 'VENDA NF-E + BONIFICAÇÃO', "
+        "'DEV PROPRIA - DE REMESSA EM BONIFICAÇÃO', 'DEVOLUÇÃO DE REMESSA EM BONIFICAÇÃO', 'REMESSA DE BONIFICAÇÃO - SAIDA'))",
     ]
     params: list[Any] = []
 
@@ -4913,7 +4986,13 @@ def get_funil_scorecard_periodos(hoje: date | None = None) -> dict:
     }
 
 
-_SC_COD_TOP_FILTER = "(cod_top IS NULL OR cod_top <> 1023) AND ([top] IS NULL OR [top] NOT LIKE '%ESTOQUE MINIM%')"
+_SC_COD_TOP_FILTER = (
+    "(cod_top IS NULL OR cod_top <> 1023) "
+    "AND ([top] IS NULL OR [top] NOT LIKE '%ESTOQUE MINIM%') "
+    "AND ([top] IS NULL OR [top] NOT IN "
+    "('PEDIDO DE VENDA - BONIFICAÇÃO', 'VENDA NF-E + BONIFICAÇÃO', "
+    "'DEV PROPRIA - DE REMESSA EM BONIFICAÇÃO', 'DEVOLUÇÃO DE REMESSA EM BONIFICAÇÃO', 'REMESSA DE BONIFICAÇÃO - SAIDA'))"
+)
 
 
 def get_funil_scorecard_resultado(ano: int, meses_trimestre: list[str], inicio_tri: str, fim_tri: str) -> dict:
@@ -5426,6 +5505,7 @@ def get_movimentacao_clientes(
             WHERE YEAR(fv.dt_entrega_cliente) IN (?, ?)
               AND (fv.cod_top IS NULL OR fv.cod_top != 1023)
               AND (fv.[top] IS NULL OR fv.[top] NOT LIKE '%ESTOQUE MINIM%')
+              AND (fv.[top] IS NULL OR fv.[top] NOT IN ('PEDIDO DE VENDA - BONIFICAÇÃO', 'VENDA NF-E + BONIFICAÇÃO', 'DEV PROPRIA - DE REMESSA EM BONIFICAÇÃO', 'DEVOLUÇÃO DE REMESSA EM BONIFICAÇÃO', 'REMESSA DE BONIFICAÇÃO - SAIDA'))
               {filtros_clause}
         ),
         ranked AS (
@@ -5530,6 +5610,7 @@ def get_movimentacao_produtos(
         WHERE YEAR(fv.dt_entrega_cliente) IN (?, ?)
           AND (fv.cod_top IS NULL OR fv.cod_top != 1023)
           AND (fv.[top] IS NULL OR fv.[top] NOT LIKE '%ESTOQUE MINIM%')
+          AND (fv.[top] IS NULL OR fv.[top] NOT IN ('PEDIDO DE VENDA - BONIFICAÇÃO', 'VENDA NF-E + BONIFICAÇÃO', 'DEV PROPRIA - DE REMESSA EM BONIFICAÇÃO', 'DEVOLUÇÃO DE REMESSA EM BONIFICAÇÃO', 'REMESSA DE BONIFICAÇÃO - SAIDA'))
           {filtros_clause}
         GROUP BY fv.cod_produto, dp.nome_produto, fv.nome_produto, fv.grupo_produto, YEAR(fv.dt_entrega_cliente)
         """,
@@ -5597,6 +5678,7 @@ def get_movimentacao_cliente_produtos(
           AND YEAR(fv.dt_entrega_cliente) = ?
           AND (fv.cod_top IS NULL OR fv.cod_top != 1023)
           AND (fv.[top] IS NULL OR fv.[top] NOT LIKE '%ESTOQUE MINIM%')
+          AND (fv.[top] IS NULL OR fv.[top] NOT IN ('PEDIDO DE VENDA - BONIFICAÇÃO', 'VENDA NF-E + BONIFICAÇÃO', 'DEV PROPRIA - DE REMESSA EM BONIFICAÇÃO', 'DEVOLUÇÃO DE REMESSA EM BONIFICAÇÃO', 'REMESSA DE BONIFICAÇÃO - SAIDA'))
           {filtros_clause}
         GROUP BY fv.cod_produto, dp.nome_produto, fv.nome_produto, fv.grupo_produto
         ORDER BY SUM(fv.valor_pendente) DESC
@@ -5644,6 +5726,7 @@ def get_movimentacao_produto_clientes(
           AND YEAR(fv.dt_entrega_cliente) = ?
           AND (fv.cod_top IS NULL OR fv.cod_top != 1023)
           AND (fv.[top] IS NULL OR fv.[top] NOT LIKE '%ESTOQUE MINIM%')
+          AND (fv.[top] IS NULL OR fv.[top] NOT IN ('PEDIDO DE VENDA - BONIFICAÇÃO', 'VENDA NF-E + BONIFICAÇÃO', 'DEV PROPRIA - DE REMESSA EM BONIFICAÇÃO', 'DEVOLUÇÃO DE REMESSA EM BONIFICAÇÃO', 'REMESSA DE BONIFICAÇÃO - SAIDA'))
           {filtros_clause}
         GROUP BY fv.cod_parc, dc.razao_social, fv.RAZAOSOCIAL
         ORDER BY SUM(fv.valor_pendente) DESC
@@ -6532,3 +6615,555 @@ def create_comentario(payload: dict, autor_id: int) -> dict:
     conn.close()
 
     return get_comentario(new_id) or {}
+
+
+# =============================================================================
+# Visão Global Polpa Brasil — comparativo Orçado x Realizado por Mercado de
+# Vendas, SEM restrição de mercado (todos os mercados sempre, ao contrário das
+# 6 telas de MERCADOS_PERMITIDOS_DASHBOARD acima).
+#
+# Fontes:
+#   - Orçamento: dbo.orcamento_2026, importada da planilha "Orçamento 2026 -
+#     Consolidado Comercial - Power Bi.xls" (aba "new sheet"). Orçamento R$ =
+#     SUM(valor_pendente) — a coluna "Valor Pendente" da planilha, exatamente
+#     como pedido (nunca ICMS/COFINS/PIS). Data: dt_prev_entrega_embarque
+#     ("Previsão de Entrega (Embarque)"), conforme instruído.
+#   - Realizado: dbo.fato_vendas, filtrando tipo_receita IN ('VENDA_FIRME',
+#     'DEVOLUCAO','NOVO_PROJETO') — exclui FORECAST, que é pipeline/previsão,
+#     não venda realizada (mesma convenção já usada no resto do sistema, ver
+#     _dash_build_fato_where/venda_firme+forecast+novo_projeto). Realizado R$
+#     = valor_pendente + vlr_st, como pedido. dbo.fato_vendas NÃO é uma
+#     tabela — é uma VIEW (CREATE VIEW dbo.fato_vendas AS SELECT ... FROM
+#     dbo.B2B), um SELECT 1:1 sobre dbo.B2B sem agregação/JOIN. A view
+#     original não expunha VLR_ST; _ensure_fato_vendas_vlr_st_column() faz um
+#     ALTER VIEW idempotente que reproduz a definição existente e acrescenta
+#     `VLR_ST AS vlr_st` — sem tocar em nenhuma coluna/lógica pré-existente
+#     (inclusive preserva o ajuste manual "ALTERAÇÃO ROBSON (18/05/2026)" já
+#     presente na view). Por ser view direta sobre B2B, não há backfill: o
+#     valor é sempre o dado vivo da B2B.
+#     Data: dt_entrega_cliente ("Dt Entrega Cliente") — 0% de nulos nas linhas
+#     realizadas, é a data real de entrega ao cliente, mais fiel a "realizado"
+#     do que dt_prev_entrega_embarque (que é uma data de PREVISÃO, usada para
+#     o orçamento).
+#   - fato_vendas não tem coluna de quantidade em unidades (só qtd_pendente_kg)
+#     — "Realizado Volume (unidades)" fica sempre None/"—", igual ao esperado
+#     pelo pedido ("se disponível").
+# =============================================================================
+
+VISAO_GLOBAL_ANO_PADRAO = 2026
+VISAO_GLOBAL_TIPOS_RECEITA_REALIZADO = ("VENDA_FIRME", "DEVOLUCAO", "NOVO_PROJETO")
+
+
+def _ensure_fato_vendas_vlr_st_column() -> None:
+    """Migração idempotente: dbo.fato_vendas é uma VIEW (SELECT 1:1 sobre
+    dbo.B2B). Se a coluna vlr_st ainda não existir na view, refaz o mesmo
+    ALTER VIEW com a definição atual (obtida via OBJECT_DEFINITION, para
+    nunca divergir de edições manuais feitas direto no SQL Server) mais
+    `VLR_ST AS vlr_st` no final da lista de colunas."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            """
+            SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE TABLE_NAME = 'fato_vendas' AND COLUMN_NAME = 'vlr_st'
+            """
+        )
+        if cursor.fetchone():
+            return
+
+        cursor.execute("SELECT OBJECT_DEFINITION(OBJECT_ID('dbo.fato_vendas'))")
+        row = cursor.fetchone()
+        definicao_atual = row[0] if row else None
+        if not definicao_atual or "DESCRPROD" not in definicao_atual:
+            raise RuntimeError(
+                "Definição atual de dbo.fato_vendas não encontrada ou em formato "
+                "inesperado — abortando ALTER VIEW para não sobrescrever a view às cegas."
+            )
+
+        marcador = "DESCRPROD                           AS nome_produto"
+        if marcador not in definicao_atual:
+            raise RuntimeError(
+                "Coluna nome_produto não encontrada no ponto esperado da view "
+                "dbo.fato_vendas — abortando ALTER VIEW por segurança."
+            )
+        nova_definicao = definicao_atual.replace(
+            marcador,
+            marcador.rstrip() + ",\n    VLR_ST                               AS vlr_st",
+            1,
+        )
+        nova_definicao = nova_definicao.replace("CREATE VIEW", "ALTER VIEW", 1)
+        cursor.execute(nova_definicao)
+        conn.commit()
+    finally:
+        cursor.close()
+        conn.close()
+VISAO_GLOBAL_TIPOS_RECEITA_TODOS = ("VENDA_FIRME", "DEVOLUCAO", "NOVO_PROJETO", "FORECAST")
+VISAO_GLOBAL_TIPO_RECEITA_CARDS = ("VENDA_FIRME", "NOVO_PROJETO", "FORECAST")
+VISAO_GLOBAL_PROJETOS_DISPONIVEIS = ("NOVOS PROJETOS", "RECORRENTES", "TESTE INDUSTRIAL")
+
+
+def get_visao_global_filtros_disponiveis() -> dict:
+    """Produtos/grupos/anos disponíveis para filtro — união de orcamento_2026
+    e fato_vendas, já que um produto pode existir orçado e ainda não vendido
+    (ou vice-versa)."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            """
+            SELECT DISTINCT cod_produto, nome_produto FROM (
+                SELECT cod_produto, nome_produto FROM dbo.orcamento_2026 WHERE cod_produto IS NOT NULL
+                UNION
+                SELECT cod_produto, nome_produto FROM dbo.fato_vendas WHERE cod_produto IS NOT NULL
+            ) x
+            ORDER BY nome_produto
+            """
+        )
+        produtos = [{"codProduto": _int(row.cod_produto), "nomeProduto": row.nome_produto} for row in cursor.fetchall()]
+
+        cursor.execute(
+            """
+            SELECT DISTINCT grupo_produto FROM (
+                SELECT grupo_produto FROM dbo.orcamento_2026 WHERE grupo_produto IS NOT NULL
+                UNION
+                SELECT grupo_produto FROM dbo.fato_vendas WHERE grupo_produto IS NOT NULL
+            ) x
+            ORDER BY grupo_produto
+            """
+        )
+        grupos = [row.grupo_produto for row in cursor.fetchall()]
+
+        cursor.execute(
+            """
+            SELECT DISTINCT ano FROM (
+                SELECT YEAR(dt_prev_entrega_embarque) AS ano FROM dbo.orcamento_2026 WHERE dt_prev_entrega_embarque IS NOT NULL
+                UNION
+                SELECT YEAR(dt_entrega_cliente) AS ano FROM dbo.fato_vendas WHERE dt_entrega_cliente IS NOT NULL
+            ) x
+            WHERE ano IS NOT NULL
+            ORDER BY ano
+            """
+        )
+        anos = [int(row.ano) for row in cursor.fetchall()]
+
+        cursor.execute(
+            """
+            SELECT DISTINCT mercado FROM (
+                SELECT NULLIF(LTRIM(RTRIM(mercado_vendas)), '') AS mercado FROM dbo.orcamento_2026
+                UNION
+                SELECT NULLIF(LTRIM(RTRIM(mercado_vendas)), '') AS mercado FROM dbo.fato_vendas
+            ) x
+            WHERE mercado IS NOT NULL
+            ORDER BY mercado
+            """
+        )
+        mercados = [row.mercado for row in cursor.fetchall()]
+    finally:
+        cursor.close()
+        conn.close()
+    return {
+        "produtos": produtos,
+        "grupos": grupos,
+        "anos": anos or [VISAO_GLOBAL_ANO_PADRAO],
+        "mercados": mercados,
+        # Fixo (não consultado) — são exatamente as 3 categorias de projeto que
+        # devem aparecer no filtro, pedidas explicitamente; evita expor o valor
+        # interno "<SEM PROJETO>" (vendas regulares, sem projeto associado).
+        "projetos": list(VISAO_GLOBAL_PROJETOS_DISPONIVEIS),
+    }
+
+
+def _vg_normalize_filtros(filtros: dict | None) -> dict:
+    filtros = filtros or {}
+    try:
+        ano = int(filtros["ano"]) if filtros.get("ano") not in (None, "") else VISAO_GLOBAL_ANO_PADRAO
+    except (TypeError, ValueError):
+        ano = VISAO_GLOBAL_ANO_PADRAO
+    tipo_receita = filtros.get("tipoReceita")
+    tipo_receita = tipo_receita.strip().upper() if isinstance(tipo_receita, str) and tipo_receita.strip() else None
+    if tipo_receita not in VISAO_GLOBAL_TIPO_RECEITA_CARDS:
+        tipo_receita = None
+    return {
+        "ano": ano,
+        "meses": _split_int_filter(filtros.get("meses")),
+        "codProdutos": _split_int_filter(filtros.get("codProdutos")),
+        "gruposProduto": _split_filter(filtros.get("gruposProduto")),
+        "tipoReceita": tipo_receita,
+        # Seleção múltipla de mercado — tanto pelo filtro dedicado quanto por
+        # clique numa linha da tabela (drill-down opcional, reversível; não é o
+        # SELETOR fixo que a spec original vetou, que escondia mercados por padrão).
+        "mercados": _split_filter(filtros.get("mercados")),
+        # Projeto (Novos Projetos/Recorrentes/Teste Industrial) — permite comparar
+        # Orçado x Realizado restrito a essas categorias específicas.
+        "projetos": _split_filter(filtros.get("projetos")),
+    }
+
+
+def _vg_where_produto_grupo(f: dict, params: list[Any]) -> list[str]:
+    """Cláusulas de produto/grupo/mercado/projeto, comuns a orçamento e
+    realizado (não inclui ano/mês — cada chamador monta o resto)."""
+    parts: list[str] = []
+    clause = _build_in_clause("mercado_vendas", f["mercados"], params)
+    if clause:
+        parts.append(clause)
+    clause = _build_in_clause("projeto", f["projetos"], params)
+    if clause:
+        parts.append(clause)
+    if f["codProdutos"]:
+        placeholders = ", ".join("?" for _ in f["codProdutos"])
+        parts.append(f"cod_produto IN ({placeholders})")
+        params.extend(f["codProdutos"])
+    if f["gruposProduto"]:
+        placeholders = ", ".join("?" for _ in f["gruposProduto"])
+        parts.append(f"grupo_produto IN ({placeholders})")
+        params.extend(f["gruposProduto"])
+    return parts
+
+
+def get_visao_global_resumo(filtros: dict | None = None) -> dict:
+    f = _vg_normalize_filtros(filtros)
+    _ensure_fato_vendas_vlr_st_column()
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    # ── Orçamento por mercado ────────────────────────────────────────────
+    orc_params: list[Any] = [f["ano"]]
+    orc_parts = ["YEAR(dt_prev_entrega_embarque) = ?"]
+    if f["meses"]:
+        placeholders = ", ".join("?" for _ in f["meses"])
+        orc_parts.append(f"MONTH(dt_prev_entrega_embarque) IN ({placeholders})")
+        orc_params.extend(f["meses"])
+    orc_parts.extend(_vg_where_produto_grupo(f, orc_params))
+    orc_where = " AND ".join(orc_parts)
+
+    cursor.execute(
+        f"""
+        SELECT COALESCE(NULLIF(LTRIM(RTRIM(mercado_vendas)), ''), 'Sem mercado informado') AS mercado,
+               SUM(valor_pendente) AS orcamento_rs,
+               SUM(qtd_pendente_kg) AS orcamento_kg,
+               SUM(qtd_pendente) AS orcamento_volume
+        FROM dbo.orcamento_2026
+        WHERE {orc_where}
+        GROUP BY COALESCE(NULLIF(LTRIM(RTRIM(mercado_vendas)), ''), 'Sem mercado informado')
+        """,
+        orc_params,
+    )
+    orcamento_por_mercado = {
+        row.mercado: {
+            "orcamentoRS": _number(row.orcamento_rs),
+            "orcamentoKG": _number(row.orcamento_kg),
+            "orcamentoVolume": _number(row.orcamento_volume),
+        }
+        for row in cursor.fetchall()
+    }
+
+    # ── Realizado por mercado ────────────────────────────────────────────
+    # Traz sempre o breakdown dos 3 tipos (Vendas Firmes, Novos Projetos,
+    # Forecast) por mercado — usado tanto nas novas colunas da tabela quanto
+    # nos 3 cards clicáveis. O filtro `tipoReceita` (clique num card) só decide
+    # qual desses 3 valores vira o "Realizado" ativo da tela (KPIs/coluna
+    # Realizado/% Orç x Real); nunca muda o que é calculado, só o que é somado
+    # como "realizado" para a comparação com o orçamento.
+    real_params: list[Any] = [f["ano"]]
+    real_parts = [
+        "YEAR(dt_entrega_cliente) = ?",
+        f"tipo_receita IN ({', '.join('?' for _ in VISAO_GLOBAL_TIPOS_RECEITA_TODOS)})",
+        # Mesma exclusão de higiene de dados já aplicada em todo o resto do sistema
+        # (build_fato_vendas_where/_dash_build_fato_where etc.) — cod_top=1023 e
+        # "ESTOQUE MINIM" são ajustes internos, não vendas reais.
+        "(cod_top IS NULL OR cod_top != 1023)",
+        "([top] IS NULL OR [top] NOT LIKE '%ESTOQUE MINIM%')",
+        f"([top] IS NULL OR [top] NOT IN ({', '.join('?' for _ in TOPS_EXCLUIDOS_DA_VENDA)}))",
+    ]
+    real_params.extend(VISAO_GLOBAL_TIPOS_RECEITA_TODOS)
+    real_params.extend(TOPS_EXCLUIDOS_DA_VENDA)
+    if f["meses"]:
+        placeholders = ", ".join("?" for _ in f["meses"])
+        real_parts.append(f"MONTH(dt_entrega_cliente) IN ({placeholders})")
+        real_params.extend(f["meses"])
+    real_parts.extend(_vg_where_produto_grupo(f, real_params))
+    real_where = " AND ".join(real_parts)
+
+    cursor.execute(
+        f"""
+        SELECT COALESCE(NULLIF(LTRIM(RTRIM(mercado_vendas)), ''), 'Sem mercado informado') AS mercado,
+               SUM(CASE WHEN tipo_receita IN ('VENDA_FIRME','DEVOLUCAO') THEN valor_pendente + COALESCE(vlr_st, 0) ELSE 0 END) AS venda_firme_rs,
+               SUM(CASE WHEN tipo_receita = 'NOVO_PROJETO' THEN valor_pendente + COALESCE(vlr_st, 0) ELSE 0 END) AS novo_projeto_rs,
+               SUM(CASE WHEN tipo_receita = 'FORECAST' THEN valor_pendente + COALESCE(vlr_st, 0) ELSE 0 END) AS forecast_rs,
+               SUM(CASE WHEN tipo_receita IN ('VENDA_FIRME','DEVOLUCAO') THEN qtd_pendente_kg ELSE 0 END) AS venda_firme_kg,
+               SUM(CASE WHEN tipo_receita = 'NOVO_PROJETO' THEN qtd_pendente_kg ELSE 0 END) AS novo_projeto_kg,
+               SUM(CASE WHEN tipo_receita = 'FORECAST' THEN qtd_pendente_kg ELSE 0 END) AS forecast_kg
+        FROM dbo.fato_vendas
+        WHERE {real_where}
+        GROUP BY COALESCE(NULLIF(LTRIM(RTRIM(mercado_vendas)), ''), 'Sem mercado informado')
+        """,
+        real_params,
+    )
+    realizado_por_mercado = {
+        row.mercado: {
+            "vendaFirmeRS": _number(row.venda_firme_rs),
+            "novoProjetoRS": _number(row.novo_projeto_rs),
+            "forecastRS": _number(row.forecast_rs),
+            "vendaFirmeKG": _number(row.venda_firme_kg),
+            "novoProjetoKG": _number(row.novo_projeto_kg),
+            "forecastKG": _number(row.forecast_kg),
+        }
+        for row in cursor.fetchall()
+    }
+
+    cursor.execute(f"SELECT COUNT(*) FROM dbo.orcamento_2026 WHERE {orc_where}", orc_params)
+    total_registros_orcamento = _int(cursor.fetchone()[0])
+    cursor.execute(f"SELECT COUNT(*) FROM dbo.fato_vendas WHERE {real_where}", real_params)
+    total_registros_realizado_filtrado = _int(cursor.fetchone()[0])
+
+    # "Base de realizado carregada?" é uma checagem ESTRUTURAL (existe realizado
+    # para este ano, independente do filtro de produto/grupo/tipo escolhido) —
+    # não pode variar conforme um filtro zera o resultado (isso seria uma falsa
+    # mensagem de "base não carregada" para um produto que só tem orçamento).
+    cursor.execute(
+        f"""
+        SELECT COUNT(*) FROM dbo.fato_vendas
+        WHERE YEAR(dt_entrega_cliente) = ?
+          AND tipo_receita IN ({', '.join('?' for _ in VISAO_GLOBAL_TIPOS_RECEITA_TODOS)})
+        """,
+        [f["ano"], *VISAO_GLOBAL_TIPOS_RECEITA_TODOS],
+    )
+    realizado_disponivel = _int(cursor.fetchone()[0]) > 0
+
+    tipo_sel = f["tipoReceita"]
+
+    def _realizado_ativo(r: dict) -> tuple[float, float]:
+        """Retorna (RS, KG) do 'Realizado' ativo, conforme o card selecionado.
+        Sem seleção: Vendas Firmes + Novos Projetos (Forecast nunca entra por
+        padrão, pois é pipeline não confirmado — ver nota no topo do arquivo)."""
+        if tipo_sel == "VENDA_FIRME":
+            return r["vendaFirmeRS"], r["vendaFirmeKG"]
+        if tipo_sel == "NOVO_PROJETO":
+            return r["novoProjetoRS"], r["novoProjetoKG"]
+        if tipo_sel == "FORECAST":
+            return r["forecastRS"], r["forecastKG"]
+        return r["vendaFirmeRS"] + r["novoProjetoRS"], r["vendaFirmeKG"] + r["novoProjetoKG"]
+
+    cursor.close()
+    conn.close()
+
+    todos_mercados = sorted(set(orcamento_por_mercado) | set(realizado_por_mercado))
+
+    def pct_orc_real(realizado: float | None, orcamento: float) -> float | None:
+        if realizado is None or not orcamento:
+            return None
+        return (realizado / orcamento) - 1
+
+    linhas: list[dict] = []
+    total_orcamento_rs = total_realizado_rs = 0.0
+    total_orcamento_kg = total_realizado_kg = 0.0
+    total_orcamento_volume = 0.0
+    total_venda_firme_rs = total_novo_projeto_rs = total_forecast_rs = 0.0
+    total_venda_firme_kg = total_novo_projeto_kg = total_forecast_kg = 0.0
+
+    for mercado in todos_mercados:
+        o = orcamento_por_mercado.get(mercado, {"orcamentoRS": 0.0, "orcamentoKG": 0.0, "orcamentoVolume": 0.0})
+        r = realizado_por_mercado.get(mercado, {
+            "vendaFirmeRS": 0.0, "novoProjetoRS": 0.0, "forecastRS": 0.0,
+            "vendaFirmeKG": 0.0, "novoProjetoKG": 0.0, "forecastKG": 0.0,
+        })
+        total_orcamento_rs += o["orcamentoRS"]
+        total_orcamento_kg += o["orcamentoKG"]
+        total_orcamento_volume += o["orcamentoVolume"]
+        realizado_rs, realizado_kg = _realizado_ativo(r)
+        # "Previsão Total" = soma incondicional dos 3 grupos (Vendas Firmes + Novos
+        # Projetos + Forecast) — mesmo conceito do card "Previsão Total" no topo da
+        # tela, independe do card de tipo selecionado.
+        previsao_total_rs = r["vendaFirmeRS"] + r["novoProjetoRS"] + r["forecastRS"]
+        previsao_total_kg = r["vendaFirmeKG"] + r["novoProjetoKG"] + r["forecastKG"]
+        if realizado_disponivel:
+            total_realizado_rs += realizado_rs
+            total_realizado_kg += realizado_kg
+            total_venda_firme_rs += r["vendaFirmeRS"]
+            total_novo_projeto_rs += r["novoProjetoRS"]
+            total_forecast_rs += r["forecastRS"]
+            total_venda_firme_kg += r["vendaFirmeKG"]
+            total_novo_projeto_kg += r["novoProjetoKG"]
+            total_forecast_kg += r["forecastKG"]
+        linhas.append({
+            "mercado": mercado,
+            "orcamentoRS": o["orcamentoRS"],
+            "orcamentoKG": o["orcamentoKG"],
+            "orcamentoVolume": o["orcamentoVolume"],
+            "realizadoRS": realizado_rs if realizado_disponivel else None,
+            "realizadoKG": realizado_kg if realizado_disponivel else None,
+            "realizadoVolume": None,
+            "vendaFirmeRS": r["vendaFirmeRS"] if realizado_disponivel else None,
+            "novoProjetoRS": r["novoProjetoRS"] if realizado_disponivel else None,
+            "forecastRS": r["forecastRS"] if realizado_disponivel else None,
+            "previsaoTotalRS": previsao_total_rs if realizado_disponivel else None,
+            "previsaoTotalKG": previsao_total_kg if realizado_disponivel else None,
+        })
+
+    for linha in linhas:
+        linha["pctOrcRealRS"] = pct_orc_real(linha["realizadoRS"], linha["orcamentoRS"])
+        linha["pctOrcRealKG"] = pct_orc_real(linha["realizadoKG"], linha["orcamentoKG"])
+        linha["pctOrcPrevisaoRS"] = pct_orc_real(linha["previsaoTotalRS"], linha["orcamentoRS"])
+        linha["pctOrcPrevisaoKG"] = pct_orc_real(linha["previsaoTotalKG"], linha["orcamentoKG"])
+        # % Vol é a participação do mesmo "Volume" mostrado na coluna ao lado (volume
+        # REALIZADO em unidades) — não do volume orçado. Como fato_vendas não tem
+        # coluna de unidades, os dois ficam "—" juntos, em vez de um % calculado sobre
+        # uma base diferente do valor exibido (o que seria enganoso).
+        linha["pctVol"] = None
+        linha["pctFat"] = (
+            (linha["realizadoRS"] / total_realizado_rs)
+            if (realizado_disponivel and total_realizado_rs and linha["realizadoRS"] is not None)
+            else None
+        )
+
+    linhas.sort(key=lambda l: l["orcamentoRS"], reverse=True)
+
+    total_previsao_total_rs = (total_venda_firme_rs + total_novo_projeto_rs + total_forecast_rs) if realizado_disponivel else None
+    total_previsao_total_kg = (total_venda_firme_kg + total_novo_projeto_kg + total_forecast_kg) if realizado_disponivel else None
+
+    total_linha = {
+        "mercado": "TOTAL",
+        "orcamentoRS": total_orcamento_rs,
+        "orcamentoKG": total_orcamento_kg,
+        "orcamentoVolume": total_orcamento_volume,
+        "realizadoRS": total_realizado_rs if realizado_disponivel else None,
+        "realizadoKG": total_realizado_kg if realizado_disponivel else None,
+        "realizadoVolume": None,
+        "vendaFirmeRS": total_venda_firme_rs if realizado_disponivel else None,
+        "novoProjetoRS": total_novo_projeto_rs if realizado_disponivel else None,
+        "forecastRS": total_forecast_rs if realizado_disponivel else None,
+        "previsaoTotalRS": total_previsao_total_rs,
+        "previsaoTotalKG": total_previsao_total_kg,
+        "pctOrcRealRS": pct_orc_real(total_realizado_rs if realizado_disponivel else None, total_orcamento_rs),
+        "pctOrcRealKG": pct_orc_real(total_realizado_kg if realizado_disponivel else None, total_orcamento_kg),
+        "pctOrcPrevisaoRS": pct_orc_real(total_previsao_total_rs, total_orcamento_rs),
+        "pctOrcPrevisaoKG": pct_orc_real(total_previsao_total_kg, total_orcamento_kg),
+        "pctVol": None,
+        "pctFat": 1.0 if (realizado_disponivel and total_realizado_rs) else None,
+    }
+
+    kpis = {
+        "orcamentoTotalRS": total_orcamento_rs,
+        "realizadoTotalRS": total_realizado_rs if realizado_disponivel else None,
+        "desvioRS": (total_realizado_rs - total_orcamento_rs) if realizado_disponivel else None,
+        "atingimentoPct": (total_realizado_rs / total_orcamento_rs) if (realizado_disponivel and total_orcamento_rs) else None,
+        "orcamentoKG": total_orcamento_kg,
+        "realizadoKG": total_realizado_kg if realizado_disponivel else None,
+        "vendaFirmeTotalRS": total_venda_firme_rs if realizado_disponivel else None,
+        "novoProjetoTotalRS": total_novo_projeto_rs if realizado_disponivel else None,
+        "forecastTotalRS": total_forecast_rs if realizado_disponivel else None,
+        "tipoReceitaSelecionado": tipo_sel,
+    }
+
+    return {
+        "linhas": linhas,
+        "total": total_linha,
+        "kpis": kpis,
+        "mensal": _vg_evolucao_mensal(f, realizado_disponivel),
+        "diagnostico": {
+            "realizadoDisponivel": realizado_disponivel,
+            "totalRegistrosOrcamento": total_registros_orcamento,
+            "totalRegistrosRealizado": total_registros_realizado_filtrado,
+            "colunaDataOrcamento": "Previsão de Entrega (Embarque)",
+            "colunaDataRealizado": "Dt Entrega Cliente",
+            "fonteOrcamento": "dbo.orcamento_2026 (planilha Orçamento 2026 - Consolidado Comercial - Power Bi.xls, aba 'new sheet')",
+            "fonteRealizado": "dbo.fato_vendas (valor_pendente + vlr_st; vlr_st migrado de dbo.B2B) — tipo_receita: VENDA_FIRME, DEVOLUCAO, NOVO_PROJETO no Realizado padrão (exclui FORECAST)",
+            "vlrStDisponivel": True,
+            "mercadosSemInformacao": [m for m in todos_mercados if m == "Sem mercado informado"],
+        },
+    }
+
+
+def _vg_evolucao_mensal(f: dict, realizado_disponivel: bool) -> list[dict]:
+    """Sempre os 12 meses do ano filtrado (não aplica o filtro de mês — um
+    gráfico de tendência mensal filtrado a 1 mês perderia o sentido). Aplica
+    produto/grupo normalmente."""
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    orc_params: list[Any] = [f["ano"]]
+    orc_parts = ["YEAR(dt_prev_entrega_embarque) = ?"]
+    orc_parts.extend(_vg_where_produto_grupo(f, orc_params))
+    cursor.execute(
+        f"""
+        SELECT MONTH(dt_prev_entrega_embarque) AS mes,
+               SUM(valor_pendente) AS orcamento_rs,
+               SUM(qtd_pendente_kg) AS orcamento_kg
+        FROM dbo.orcamento_2026
+        WHERE {' AND '.join(orc_parts)}
+        GROUP BY MONTH(dt_prev_entrega_embarque)
+        """,
+        orc_params,
+    )
+    orcamento_mensal = {
+        int(row.mes): {"orcamentoRS": _number(row.orcamento_rs), "orcamentoKG": _number(row.orcamento_kg)}
+        for row in cursor.fetchall()
+    }
+
+    realizado_mensal: dict[int, dict[str, float]] = {}
+    if realizado_disponivel:
+        # Inclui FORECAST aqui só para exibição no gráfico (mesma série amarela
+        # mostrada no Dashboard) — NÃO entra em VISAO_GLOBAL_TIPOS_RECEITA_REALIZADO
+        # nem em nenhum KPI/tabela de Realizado x Orçado, que continuam excluindo
+        # Forecast (pipeline não confirmado não pode contar como realizado).
+        real_params: list[Any] = [f["ano"], *VISAO_GLOBAL_TIPOS_RECEITA_REALIZADO, "FORECAST"]
+        real_parts = [
+            "YEAR(dt_entrega_cliente) = ?",
+            f"tipo_receita IN ({', '.join('?' for _ in VISAO_GLOBAL_TIPOS_RECEITA_REALIZADO)}, ?)",
+            "(cod_top IS NULL OR cod_top != 1023)",
+            "([top] IS NULL OR [top] NOT LIKE '%ESTOQUE MINIM%')",
+            f"([top] IS NULL OR [top] NOT IN ({', '.join('?' for _ in TOPS_EXCLUIDOS_DA_VENDA)}))",
+        ]
+        real_params.extend(TOPS_EXCLUIDOS_DA_VENDA)
+        real_parts.extend(_vg_where_produto_grupo(f, real_params))
+        cursor.execute(
+            f"""
+            SELECT MONTH(dt_entrega_cliente) AS mes,
+                   SUM(CASE WHEN tipo_receita IN ('VENDA_FIRME','DEVOLUCAO') THEN valor_pendente + COALESCE(vlr_st, 0) ELSE 0 END) AS venda_firme_rs,
+                   SUM(CASE WHEN tipo_receita = 'NOVO_PROJETO' THEN valor_pendente + COALESCE(vlr_st, 0) ELSE 0 END) AS novo_projeto_rs,
+                   SUM(CASE WHEN tipo_receita = 'FORECAST' THEN valor_pendente + COALESCE(vlr_st, 0) ELSE 0 END) AS forecast_rs,
+                   SUM(CASE WHEN tipo_receita IN ('VENDA_FIRME','DEVOLUCAO') THEN qtd_pendente_kg ELSE 0 END) AS venda_firme_kg,
+                   SUM(CASE WHEN tipo_receita = 'NOVO_PROJETO' THEN qtd_pendente_kg ELSE 0 END) AS novo_projeto_kg,
+                   SUM(CASE WHEN tipo_receita = 'FORECAST' THEN qtd_pendente_kg ELSE 0 END) AS forecast_kg
+            FROM dbo.fato_vendas
+            WHERE {' AND '.join(real_parts)}
+            GROUP BY MONTH(dt_entrega_cliente)
+            """,
+            real_params,
+        )
+        realizado_mensal = {
+            int(row.mes): {
+                "vendaFirmeRS": _number(row.venda_firme_rs),
+                "novoProjetoRS": _number(row.novo_projeto_rs),
+                "forecastRS": _number(row.forecast_rs),
+                "vendaFirmeKG": _number(row.venda_firme_kg),
+                "novoProjetoKG": _number(row.novo_projeto_kg),
+                "forecastKG": _number(row.forecast_kg),
+            }
+            for row in cursor.fetchall()
+        }
+
+    cursor.close()
+    conn.close()
+
+    vazio_kg = {"vendaFirmeRS": 0.0, "novoProjetoRS": 0.0, "forecastRS": 0.0, "vendaFirmeKG": 0.0, "novoProjetoKG": 0.0, "forecastKG": 0.0}
+    resultado = []
+    for mes in range(1, 13):
+        vf = realizado_mensal.get(mes, vazio_kg)
+        orc = orcamento_mensal.get(mes, {"orcamentoRS": 0.0, "orcamentoKG": 0.0})
+        resultado.append({
+            "mes": mes,
+            "orcamentoRS": orc["orcamentoRS"],
+            "orcamentoKG": orc["orcamentoKG"],
+            "vendaFirmeRS": vf["vendaFirmeRS"] if realizado_disponivel else None,
+            "novoProjetoRS": vf["novoProjetoRS"] if realizado_disponivel else None,
+            "forecastRS": vf["forecastRS"] if realizado_disponivel else None,
+            "realizadoRS": (vf["vendaFirmeRS"] + vf["novoProjetoRS"]) if realizado_disponivel else None,
+            "vendaFirmeKG": vf["vendaFirmeKG"] if realizado_disponivel else None,
+            "novoProjetoKG": vf["novoProjetoKG"] if realizado_disponivel else None,
+            "forecastKG": vf["forecastKG"] if realizado_disponivel else None,
+            "realizadoKG": (vf["vendaFirmeKG"] + vf["novoProjetoKG"]) if realizado_disponivel else None,
+        })
+    return resultado
