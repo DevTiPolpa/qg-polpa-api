@@ -699,7 +699,7 @@ def get_vendedores_kpis_original(filtros: dict | None = None) -> dict:
         f"""
         SELECT
             COALESCE(SUM(fv.valor_pendente), 0) AS faturamento_total,
-            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volume_total,
+            COALESCE(SUM(fv.peso_liquido), 0) AS volume_total,
             COUNT(DISTINCT fv.cod_parc) AS clientes_ativos,
             COUNT(DISTINCT fv.cod_produto) AS produtos_vendidos,
             COUNT(*) AS total_registros,
@@ -739,7 +739,7 @@ def list_vendedores_evolucao_original(filtros: dict | None = None) -> list[dict]
         SELECT
             FORMAT(fv.dt_entrega_cliente, 'yyyy-MM') AS mes,
             COALESCE(SUM(fv.valor_pendente), 0) AS faturamento,
-            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volume,
+            COALESCE(SUM(fv.peso_liquido), 0) AS volume,
             COALESCE(SUM(CASE WHEN fv.tipo_receita IN ('VENDA_FIRME','DEVOLUCAO') THEN fv.valor_pendente ELSE 0 END), 0) AS venda_firme,
             COALESCE(SUM(CASE WHEN fv.tipo_receita = 'FORECAST' THEN fv.valor_pendente ELSE 0 END), 0) AS forecast,
             COALESCE(SUM(CASE WHEN fv.tipo_receita = 'NOVO_PROJETO' THEN fv.valor_pendente ELSE 0 END), 0) AS novo_projeto,
@@ -778,7 +778,7 @@ def list_vendedores_performance_original(filtros: dict | None = None) -> list[di
         SELECT
             fv.nome_vendedor AS nome_vendedor,
             COALESCE(SUM(fv.valor_pendente), 0) AS faturamento,
-            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volume,
+            COALESCE(SUM(fv.peso_liquido), 0) AS volume,
             COUNT(DISTINCT fv.cod_parc) AS clientes,
             COUNT(DISTINCT fv.cod_produto) AS produtos,
             COALESCE(SUM(CASE WHEN fv.tipo_receita IN ('VENDA_FIRME','DEVOLUCAO') THEN fv.valor_pendente ELSE 0 END), 0) AS venda_firme,
@@ -827,7 +827,7 @@ def list_vendedores_clientes_consolidados_original(filtros: dict | None = None, 
             fv.perfil_parceiro AS perfil_parceiro,
             fv.uf AS uf,
             COALESCE(SUM(fv.valor_pendente), 0) AS faturamento,
-            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volume,
+            COALESCE(SUM(fv.peso_liquido), 0) AS volume,
             MAX(CONVERT(VARCHAR, fv.dt_entrega_cliente, 23)) AS ultima_compra
         FROM dbo.fato_vendas fv
         LEFT JOIN dbo.dim_cliente dc ON fv.cod_parc = dc.cod_parc
@@ -1102,7 +1102,7 @@ def list_vendedores_cliente_mix_original(cod_parc: int, filtros: dict | None = N
             COALESCE(dp.nome_produto, fv.nome_produto) AS nomeProduto,
             fv.grupo_produto AS grupoProduto,
             COALESCE(SUM(fv.valor_pendente), 0) AS faturamento,
-            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volume,
+            COALESCE(SUM(fv.peso_liquido), 0) AS volume,
             COUNT(DISTINCT fv.nro_unico) AS pedidos,
             MAX(CONVERT(VARCHAR, fv.dt_entrega_cliente, 23)) AS ultimaCompra
         FROM dbo.fato_vendas fv
@@ -1148,7 +1148,7 @@ def list_vendedores_cliente_produto_mensal_original(cod_parc: int, cod_produto: 
         f"""
         SELECT
             FORMAT(fv.dt_entrega_cliente, 'yyyy-MM') AS mes,
-            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS quantidade,
+            COALESCE(SUM(fv.peso_liquido), 0) AS quantidade,
             COALESCE(SUM(fv.valor_pendente), 0) AS valor
         FROM dbo.fato_vendas fv
         WHERE fv.cod_parc = ?
@@ -1343,7 +1343,7 @@ def get_dashboard_original_kpis(filtros: dict | None = None) -> dict:
         f"""
         SELECT
             COALESCE(SUM(fv.valor_pendente), 0) AS faturamento_bruto,
-            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volume_bruto,
+            COALESCE(SUM(fv.peso_liquido), 0) AS volume_bruto,
             0 AS faturamento_devolucao,
             0 AS volume_devolucao,
             COUNT(DISTINCT fv.cod_parc) AS clientes_unicos,
@@ -1386,13 +1386,13 @@ def list_dashboard_original_evolucao_mensal(filtros: dict | None = None) -> list
         SELECT
             FORMAT(fv.dt_entrega_cliente, 'yyyy-MM') AS mes,
             COALESCE(SUM(fv.valor_pendente), 0) AS faturamento,
-            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volume,
+            COALESCE(SUM(fv.peso_liquido), 0) AS volume,
             COALESCE(SUM(CASE WHEN fv.tipo_receita IN ('VENDA_FIRME','DEVOLUCAO') THEN fv.valor_pendente ELSE 0 END), 0) AS venda_firme,
             COALESCE(SUM(CASE WHEN fv.tipo_receita = 'FORECAST' THEN fv.valor_pendente ELSE 0 END), 0) AS forecast,
             COALESCE(SUM(CASE WHEN fv.tipo_receita = 'NOVO_PROJETO' THEN fv.valor_pendente ELSE 0 END), 0) AS novo_projeto,
-            COALESCE(SUM(CASE WHEN fv.tipo_receita IN ('VENDA_FIRME','DEVOLUCAO') THEN fv.qtd_pendente_kg ELSE 0 END), 0) AS volume_venda_firme,
-            COALESCE(SUM(CASE WHEN fv.tipo_receita = 'FORECAST' THEN fv.qtd_pendente_kg ELSE 0 END), 0) AS volume_forecast,
-            COALESCE(SUM(CASE WHEN fv.tipo_receita = 'NOVO_PROJETO' THEN fv.qtd_pendente_kg ELSE 0 END), 0) AS volume_novo_projeto
+            COALESCE(SUM(CASE WHEN fv.tipo_receita IN ('VENDA_FIRME','DEVOLUCAO') THEN fv.peso_liquido ELSE 0 END), 0) AS volume_venda_firme,
+            COALESCE(SUM(CASE WHEN fv.tipo_receita = 'FORECAST' THEN fv.peso_liquido ELSE 0 END), 0) AS volume_forecast,
+            COALESCE(SUM(CASE WHEN fv.tipo_receita = 'NOVO_PROJETO' THEN fv.peso_liquido ELSE 0 END), 0) AS volume_novo_projeto
         FROM dbo.fato_vendas fv
         {clause}
         GROUP BY FORMAT(fv.dt_entrega_cliente, 'yyyy-MM')
@@ -1432,7 +1432,7 @@ def list_dashboard_original_evolucao_ano_anterior(filtros: dict | None = None) -
         SELECT
             FORMAT(fv.dt_entrega_cliente, 'yyyy-MM') AS mes,
             COALESCE(SUM(fv.valor_pendente), 0) AS faturamento,
-            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volume
+            COALESCE(SUM(fv.peso_liquido), 0) AS volume
         FROM dbo.fato_vendas fv
         {clause}
         GROUP BY FORMAT(fv.dt_entrega_cliente, 'yyyy-MM')
@@ -1461,7 +1461,7 @@ def list_dashboard_original_kpis_por_tipo(filtros: dict | None = None) -> list[d
         SELECT
             CASE WHEN fv.tipo_receita = 'DEVOLUCAO' THEN 'VENDA_FIRME' ELSE fv.tipo_receita END AS tipo_receita,
             COALESCE(SUM(fv.valor_pendente), 0) AS faturamento,
-            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volume,
+            COALESCE(SUM(fv.peso_liquido), 0) AS volume,
             COUNT(DISTINCT fv.cod_parc) AS clientes,
             COUNT(*) AS registros
         FROM dbo.fato_vendas fv
@@ -1536,7 +1536,7 @@ def list_dashboard_original_segmentos(filtros: dict | None = None) -> list[dict]
         SELECT
             fv.perfil_parceiro AS segmento,
             COALESCE(SUM(fv.valor_pendente), 0) AS faturamento,
-            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volume,
+            COALESCE(SUM(fv.peso_liquido), 0) AS volume,
             COUNT(DISTINCT fv.cod_parc) AS clientes,
             COUNT(DISTINCT fv.cod_produto) AS produtos
         FROM dbo.fato_vendas fv
@@ -1565,7 +1565,7 @@ def list_dashboard_original_projetos(filtros: dict | None = None) -> list[dict]:
         SELECT
             fv.projeto AS projeto,
             COALESCE(SUM(fv.valor_pendente), 0) AS faturamento,
-            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volume,
+            COALESCE(SUM(fv.peso_liquido), 0) AS volume,
             COUNT(DISTINCT fv.cod_parc) AS clientes
         FROM dbo.fato_vendas fv
         {clause}
@@ -1595,7 +1595,7 @@ def list_dashboard_original_clientes_top(filtros: dict | None = None, limit: int
             fv.cod_parc AS cod_parc,
             COALESCE(dc.razao_social, fv.RAZAOSOCIAL) AS razao_social,
             COALESCE(SUM(fv.valor_pendente), 0) AS faturamento,
-            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volume,
+            COALESCE(SUM(fv.peso_liquido), 0) AS volume,
             COUNT(DISTINCT fv.cod_produto) AS produtos
         FROM dbo.fato_vendas fv
         LEFT JOIN dbo.dim_cliente dc ON fv.cod_parc = dc.cod_parc
@@ -1631,7 +1631,7 @@ def list_dashboard_original_drilldown(tipo_receita: str, filtros: dict | None = 
             fv.grupo_produto AS grupo_produto,
             fv.nome_vendedor AS nome_vendedor,
             COALESCE(SUM(fv.valor_pendente), 0) AS faturamento,
-            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volume,
+            COALESCE(SUM(fv.peso_liquido), 0) AS volume,
             COUNT(*) AS registros,
             MAX(CONVERT(VARCHAR, fv.dt_entrega_cliente, 23)) AS dt_prev_entrega
         FROM dbo.fato_vendas fv
@@ -1672,7 +1672,7 @@ def list_dashboard_original_cliente_mix(cod_parc: int, filtros: dict | None = No
             COALESCE(dp.nome_produto, fv.nome_produto) AS nome_produto,
             fv.grupo_produto AS grupo_produto,
             COALESCE(SUM(fv.valor_pendente), 0) AS faturamento,
-            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volume
+            COALESCE(SUM(fv.peso_liquido), 0) AS volume
         FROM dbo.fato_vendas fv
         LEFT JOIN dbo.dim_produto dp ON fv.cod_produto = dp.cod_produto
         {clause}
@@ -1708,7 +1708,7 @@ def list_dashboard_original_produtos_top(filtros: dict | None = None, limit: int
             COALESCE(dp.nome_produto, fv.nome_produto) AS nome_produto,
             fv.grupo_produto AS grupo_produto,
             COALESCE(SUM(fv.valor_pendente), 0) AS faturamento,
-            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volume,
+            COALESCE(SUM(fv.peso_liquido), 0) AS volume,
             COUNT(DISTINCT fv.cod_parc) AS clientes
         FROM dbo.fato_vendas fv
         LEFT JOIN dbo.dim_produto dp ON fv.cod_produto = dp.cod_produto
@@ -1743,7 +1743,7 @@ def list_dashboard_original_produto_mix(cod_produto: int, filtros: dict | None =
             fv.cod_parc AS cod_parc,
             COALESCE(dc.razao_social, fv.RAZAOSOCIAL) AS razao_social,
             COALESCE(SUM(fv.valor_pendente), 0) AS faturamento,
-            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volume
+            COALESCE(SUM(fv.peso_liquido), 0) AS volume
         FROM dbo.fato_vendas fv
         LEFT JOIN dbo.dim_cliente dc ON fv.cod_parc = dc.cod_parc
         {clause}
@@ -1803,7 +1803,7 @@ def list_dashboard_original_regioes_top(filtros: dict | None = None) -> list[dic
         SELECT
             {regiao_expr} AS regiao,
             COALESCE(SUM(fv.valor_pendente), 0) AS faturamento,
-            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volume,
+            COALESCE(SUM(fv.peso_liquido), 0) AS volume,
             COUNT(DISTINCT fv.cod_parc) AS clientes,
             COUNT(DISTINCT fv.uf) AS estados
         FROM dbo.fato_vendas fv
@@ -1839,7 +1839,7 @@ def list_dashboard_original_regiao_mix(regiao: str, filtros: dict | None = None)
         SELECT
             fv.uf AS uf,
             COALESCE(SUM(fv.valor_pendente), 0) AS faturamento,
-            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volume,
+            COALESCE(SUM(fv.peso_liquido), 0) AS volume,
             COUNT(DISTINCT fv.cod_parc) AS clientes
         FROM dbo.fato_vendas fv
         {clause}
@@ -2109,7 +2109,7 @@ _NP_PROJETO_SELECT = """
         FORMAT(MIN(p.dt_primeiro), 'yyyy-MM') AS dtPrimeiro,
         DATEDIFF(MONTH, MIN(p.dt_primeiro), GETDATE()) + 1 AS mesAtualCiclo,
         FORMAT(MAX(fv.dt_entrega_cliente), 'yyyy-MM-dd') AS ultimaCompra,
-        COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volumeTotal,
+        COALESCE(SUM(fv.peso_liquido), 0) AS volumeTotal,
         COALESCE(SUM(fv.valor_pendente), 0) AS faturamentoTotal,
         CASE WHEN DATEDIFF(MONTH, MIN(p.dt_primeiro), GETDATE()) + 1 <= 12
             THEN 'Novo Projeto' ELSE 'Recorrente' END AS status,
@@ -2375,7 +2375,7 @@ def list_novos_projetos_recorrentes_convertidos(filtros: dict | None = None) -> 
             FORMAT(c.dt_primeiro, 'yyyy-MM') AS dtPrimeiro,
             DATEDIFF(MONTH, c.dt_primeiro, GETDATE()) + 1 AS mesAtualCiclo,
             FORMAT(MAX(fv.dt_entrega_cliente), 'yyyy-MM-dd') AS ultimaCompra,
-            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volumeTotal,
+            COALESCE(SUM(fv.peso_liquido), 0) AS volumeTotal,
             COALESCE(SUM(fv.valor_pendente), 0) AS faturamentoTotal
         FROM convertidos c
         JOIN dbo.fato_vendas fv ON fv.cod_parc = c.cod_parc AND fv.cod_produto = c.cod_produto
@@ -2657,9 +2657,9 @@ def get_historico_clientes_kpis(filtros: dict | None = None) -> dict:
         f"""
         SELECT
             COALESCE(SUM(fv.valor_pendente), 0) AS totalValor,
-            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS totalVolume,
-            CASE WHEN COALESCE(SUM(fv.qtd_pendente_kg), 0) > 0
-                THEN SUM(fv.valor_pendente) / SUM(fv.qtd_pendente_kg)
+            COALESCE(SUM(fv.peso_liquido), 0) AS totalVolume,
+            CASE WHEN COALESCE(SUM(fv.peso_liquido), 0) > 0
+                THEN SUM(fv.valor_pendente) / SUM(fv.peso_liquido)
                 ELSE 0 END AS precoMedio,
             COUNT(DISTINCT fv.cod_produto) AS qtdProdutos,
             COUNT(DISTINCT fv.cod_parc) AS qtdClientes
@@ -2672,7 +2672,7 @@ def get_historico_clientes_kpis(filtros: dict | None = None) -> dict:
         f"""
         SELECT
             COALESCE(SUM(fv.valor_pendente), 0) AS totalValor,
-            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS totalVolume
+            COALESCE(SUM(fv.peso_liquido), 0) AS totalVolume
         FROM fato_vendas fv
         {base_clause}
         """,
@@ -2705,9 +2705,9 @@ def list_historico_clientes(filtros: dict | None = None) -> list[dict]:
             fv.cod_parc AS codParc,
             COALESCE(MAX(dc.razao_social), MAX(fv.RAZAOSOCIAL)) AS razaoSocial,
             COALESCE(SUM(fv.valor_pendente), 0) AS valor,
-            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volume,
-            CASE WHEN COALESCE(SUM(fv.qtd_pendente_kg), 0) > 0
-                THEN SUM(fv.valor_pendente) / SUM(fv.qtd_pendente_kg)
+            COALESCE(SUM(fv.peso_liquido), 0) AS volume,
+            CASE WHEN COALESCE(SUM(fv.peso_liquido), 0) > 0
+                THEN SUM(fv.valor_pendente) / SUM(fv.peso_liquido)
                 ELSE 0 END AS precoMedio,
             COUNT(DISTINCT fv.cod_produto) AS qtdProdutos,
             MAX(fv.dt_entrega_cliente) AS ultimaCompra
@@ -2743,9 +2743,9 @@ def list_historico_clientes_evolucao_mensal(filtros: dict | None = None) -> list
         f"""
         SELECT
             MONTH(fv.dt_entrega_cliente) AS mes,
-            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volume,
-            CASE WHEN COALESCE(SUM(fv.qtd_pendente_kg), 0) > 0
-                THEN SUM(fv.valor_pendente) / SUM(fv.qtd_pendente_kg)
+            COALESCE(SUM(fv.peso_liquido), 0) AS volume,
+            CASE WHEN COALESCE(SUM(fv.peso_liquido), 0) > 0
+                THEN SUM(fv.valor_pendente) / SUM(fv.peso_liquido)
                 ELSE 0 END AS precoMedio,
             COALESCE(SUM(fv.valor_pendente), 0) AS valor
         FROM fato_vendas fv
@@ -2773,7 +2773,7 @@ def list_historico_clientes_por_estado(filtros: dict | None = None) -> list[dict
         SELECT
             fv.uf AS uf,
             COALESCE(SUM(fv.valor_pendente), 0) AS valor,
-            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volume
+            COALESCE(SUM(fv.peso_liquido), 0) AS volume
         FROM fato_vendas fv
         {clause}
         GROUP BY fv.uf
@@ -2801,7 +2801,7 @@ def list_historico_clientes_por_segmento(filtros: dict | None = None) -> list[di
         SELECT
             fv.grupo_produto AS segmento,
             COALESCE(SUM(fv.valor_pendente), 0) AS valor,
-            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volume
+            COALESCE(SUM(fv.peso_liquido), 0) AS volume
         FROM fato_vendas fv
         {clause}
         GROUP BY fv.grupo_produto
@@ -2829,7 +2829,7 @@ def list_historico_clientes_por_perfil(filtros: dict | None = None) -> list[dict
         SELECT
             fv.perfil_parceiro AS perfil,
             COALESCE(SUM(fv.valor_pendente), 0) AS valor,
-            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volume
+            COALESCE(SUM(fv.peso_liquido), 0) AS volume
         FROM fato_vendas fv
         {clause}
         GROUP BY fv.perfil_parceiro
@@ -2859,10 +2859,10 @@ def list_historico_cliente_produtos(cod_parc: int, filtros: dict | None = None) 
         SELECT
             CAST(fv.cod_produto AS NVARCHAR(50)) AS codProduto,
             COALESCE(MAX(dp.nome_produto), MAX(fv.nome_produto), CAST(fv.cod_produto AS NVARCHAR(50))) AS nomeProduto,
-            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volume,
+            COALESCE(SUM(fv.peso_liquido), 0) AS volume,
             COALESCE(SUM(fv.valor_pendente), 0) AS valor,
-            CASE WHEN COALESCE(SUM(fv.qtd_pendente_kg), 0) > 0
-                THEN COALESCE(SUM(fv.valor_pendente), 0) / SUM(fv.qtd_pendente_kg)
+            CASE WHEN COALESCE(SUM(fv.peso_liquido), 0) > 0
+                THEN COALESCE(SUM(fv.valor_pendente), 0) / SUM(fv.peso_liquido)
                 ELSE 0 END AS precoMedio,
             MAX(fv.dt_entrega_cliente) AS dtUltimaCompra
         FROM fato_vendas fv
@@ -2896,7 +2896,7 @@ def list_historico_cliente_produto_mensal(cod_parc: int, cod_produto: str, filtr
         f"""
         SELECT
             FORMAT(fv.dt_entrega_cliente, 'yyyy-MM') AS mes,
-            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS quantidade,
+            COALESCE(SUM(fv.peso_liquido), 0) AS quantidade,
             COALESCE(SUM(fv.valor_pendente), 0) AS valor
         FROM fato_vendas fv
         {clause}
@@ -3038,7 +3038,7 @@ def get_snapshot_historico(filtros: dict | None = None) -> dict:
             fv.cod_parc AS codParc,
             COALESCE(MAX(dc.razao_social), MAX(fv.RAZAOSOCIAL)) AS razaoSocial,
             COALESCE(SUM(fv.valor_pendente), 0) AS valor,
-            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volume,
+            COALESCE(SUM(fv.peso_liquido), 0) AS volume,
             MIN(CONVERT(VARCHAR(10), fv.dt_entrega_cliente, 23)) AS dtEntrega
         FROM dbo.fato_vendas fv
         LEFT JOIN dbo.dim_cliente dc ON fv.cod_parc = dc.cod_parc
@@ -3119,7 +3119,7 @@ def get_snapshot_historico_produtos(cod_parc: int, filtros: dict | None = None) 
             fv.cod_produto AS codProduto,
             COALESCE(MAX(dp.nome_produto), MAX(fv.nome_produto)) AS nomeProduto,
             COALESCE(SUM(fv.valor_pendente), 0) AS valor,
-            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volume,
+            COALESCE(SUM(fv.peso_liquido), 0) AS volume,
             MIN(CONVERT(VARCHAR(10), fv.dt_entrega_cliente, 23)) AS dtEntrega
         FROM dbo.fato_vendas fv
         LEFT JOIN dbo.dim_produto dp ON fv.cod_produto = dp.cod_produto
@@ -3193,7 +3193,7 @@ def criar_forecast_snapshot() -> dict:
             fv.tipo_receita,
             fv.uf,
             COALESCE(SUM(fv.valor_pendente), 0),
-            COALESCE(SUM(fv.qtd_pendente_kg), 0),
+            COALESCE(SUM(fv.peso_liquido), 0),
             fv.dt_entrega_cliente
         FROM dbo.fato_vendas fv
         LEFT JOIN dbo.dim_cliente dc ON fv.cod_parc = dc.cod_parc
@@ -3306,7 +3306,7 @@ def get_recorrentes_kpis(filtros: dict | None = None) -> dict:
         f"""
         SELECT
             COALESCE(SUM(fv.valor_pendente), 0) AS fatAtual,
-            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volAtual
+            COALESCE(SUM(fv.peso_liquido), 0) AS volAtual
         FROM dbo.fato_vendas fv
         WHERE {real_where}
         """,
@@ -3348,7 +3348,7 @@ def list_recorrentes_tabela(filtros: dict | None = None) -> list[dict]:
                 fv.cod_parc,
                 MAX(COALESCE(dcr.razao_social, fv.RAZAOSOCIAL)) AS razaoSocial,
                 COALESCE(SUM(fv.valor_pendente), 0) AS fatAtual,
-                COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volAtual
+                COALESCE(SUM(fv.peso_liquido), 0) AS volAtual
             FROM dbo.fato_vendas fv
             LEFT JOIN dbo.dim_cliente dcr ON fv.cod_parc = dcr.cod_parc
             WHERE {real_where}
@@ -3416,7 +3416,7 @@ def list_recorrentes_produtos(cod_parc: int, filtros: dict | None = None) -> lis
                 fv.cod_produto,
                 MAX(COALESCE(dp.nome_produto, fv.nome_produto, CAST(fv.cod_produto AS VARCHAR))) AS nomeProduto,
                 COALESCE(SUM(fv.valor_pendente), 0) AS fatAtual,
-                COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volAtual
+                COALESCE(SUM(fv.peso_liquido), 0) AS volAtual
             FROM dbo.fato_vendas fv
             LEFT JOIN dbo.dim_produto dp ON fv.cod_produto = dp.cod_produto
             WHERE {real_where}
@@ -5601,7 +5601,7 @@ def get_movimentacao_produtos(
             fv.grupo_produto AS grupo_produto,
             YEAR(fv.dt_entrega_cliente) AS ano,
             COALESCE(SUM(fv.valor_pendente), 0) AS faturamento,
-            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volume,
+            COALESCE(SUM(fv.peso_liquido), 0) AS volume,
             COUNT(DISTINCT fv.cod_parc) AS clientes,
             MIN(fv.dt_entrega_cliente) AS primeira_venda,
             MAX(fv.dt_entrega_cliente) AS ultima_venda
@@ -5671,7 +5671,7 @@ def get_movimentacao_cliente_produtos(
             COALESCE(dp.nome_produto, fv.nome_produto) AS nome_produto,
             fv.grupo_produto AS grupo_produto,
             COALESCE(SUM(fv.valor_pendente), 0) AS faturamento,
-            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volume
+            COALESCE(SUM(fv.peso_liquido), 0) AS volume
         FROM dbo.fato_vendas fv
         LEFT JOIN dbo.dim_produto dp ON fv.cod_produto = dp.cod_produto
         WHERE fv.cod_parc = ?
@@ -5719,7 +5719,7 @@ def get_movimentacao_produto_clientes(
             fv.cod_parc AS cod_parc,
             COALESCE(dc.razao_social, fv.RAZAOSOCIAL) AS razao_social,
             COALESCE(SUM(fv.valor_pendente), 0) AS faturamento,
-            COALESCE(SUM(fv.qtd_pendente_kg), 0) AS volume
+            COALESCE(SUM(fv.peso_liquido), 0) AS volume
         FROM dbo.fato_vendas fv
         LEFT JOIN dbo.dim_cliente dc ON fv.cod_parc = dc.cod_parc
         WHERE fv.cod_produto = ?
@@ -6645,9 +6645,15 @@ def create_comentario(payload: dict, autor_id: int) -> dict:
 #     realizadas, é a data real de entrega ao cliente, mais fiel a "realizado"
 #     do que dt_prev_entrega_embarque (que é uma data de PREVISÃO, usada para
 #     o orçamento).
-#   - fato_vendas não tem coluna de quantidade em unidades (só qtd_pendente_kg)
-#     — "Realizado Volume (unidades)" fica sempre None/"—", igual ao esperado
-#     pelo pedido ("se disponível").
+#   - fato_vendas não tem coluna de quantidade em unidades — "Realizado Volume
+#     (unidades)" fica sempre None/"—", igual ao esperado pelo pedido ("se
+#     disponível"). O KG do lado Realizado usa `peso_liquido` (PESOLIQ do
+#     B2B, exposta na view por _ensure_fato_vendas_peso_liquido_column()) —
+#     não `qtd_pendente_kg` (QTDPENDENTE), que é o que o Orçamento usa nessa
+#     mesma coluna. São grandezas diferentes por decisão explícita: o
+#     Orçamento não tem um equivalente de peso líquido importado, então a
+#     comparação "% Orç x Previsão Total KG" fica sabidamente inconsistente
+#     entre as duas pontas — aceito assim a pedido do usuário.
 # =============================================================================
 
 VISAO_GLOBAL_ANO_PADRAO = 2026
@@ -6690,6 +6696,54 @@ def _ensure_fato_vendas_vlr_st_column() -> None:
         nova_definicao = definicao_atual.replace(
             marcador,
             marcador.rstrip() + ",\n    VLR_ST                               AS vlr_st",
+            1,
+        )
+        nova_definicao = nova_definicao.replace("CREATE VIEW", "ALTER VIEW", 1)
+        cursor.execute(nova_definicao)
+        conn.commit()
+    finally:
+        cursor.close()
+
+
+def _ensure_fato_vendas_peso_liquido_column() -> None:
+    """Migração idempotente: expõe PESOLIQ (peso líquido, dbo.B2B) na view
+    dbo.fato_vendas como `peso_liquido` — mesma técnica de
+    _ensure_fato_vendas_vlr_st_column() (ALTER VIEW reconstruído a partir da
+    definição atual via OBJECT_DEFINITION, nunca diverge de edição manual
+    feita direto no SQL Server). Chamada 1x no startup da aplicação, já que
+    `peso_liquido` passa a ser usado pela quantidade de funções que hoje leem
+    `qtd_pendente_kg` de fato_vendas — não dá pra chamar isso de forma lazy
+    em cada uma delas."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            """
+            SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE TABLE_NAME = 'fato_vendas' AND COLUMN_NAME = 'peso_liquido'
+            """
+        )
+        if cursor.fetchone():
+            return
+
+        cursor.execute("SELECT OBJECT_DEFINITION(OBJECT_ID('dbo.fato_vendas'))")
+        row = cursor.fetchone()
+        definicao_atual = row[0] if row else None
+        if not definicao_atual or "DESCRPROD" not in definicao_atual:
+            raise RuntimeError(
+                "Definição atual de dbo.fato_vendas não encontrada ou em formato "
+                "inesperado — abortando ALTER VIEW para não sobrescrever a view às cegas."
+            )
+
+        marcador = "DESCRPROD                           AS nome_produto"
+        if marcador not in definicao_atual:
+            raise RuntimeError(
+                "Coluna nome_produto não encontrada no ponto esperado da view "
+                "dbo.fato_vendas — abortando ALTER VIEW por segurança."
+            )
+        nova_definicao = definicao_atual.replace(
+            marcador,
+            marcador.rstrip() + ",\n    PESOLIQ                              AS peso_liquido",
             1,
         )
         nova_definicao = nova_definicao.replace("CREATE VIEW", "ALTER VIEW", 1)
@@ -6892,9 +6946,9 @@ def get_visao_global_resumo(filtros: dict | None = None) -> dict:
                SUM(CASE WHEN tipo_receita IN ('VENDA_FIRME','DEVOLUCAO') THEN valor_pendente + COALESCE(vlr_st, 0) ELSE 0 END) AS venda_firme_rs,
                SUM(CASE WHEN tipo_receita = 'NOVO_PROJETO' THEN valor_pendente + COALESCE(vlr_st, 0) ELSE 0 END) AS novo_projeto_rs,
                SUM(CASE WHEN tipo_receita = 'FORECAST' THEN valor_pendente + COALESCE(vlr_st, 0) ELSE 0 END) AS forecast_rs,
-               SUM(CASE WHEN tipo_receita IN ('VENDA_FIRME','DEVOLUCAO') THEN qtd_pendente_kg ELSE 0 END) AS venda_firme_kg,
-               SUM(CASE WHEN tipo_receita = 'NOVO_PROJETO' THEN qtd_pendente_kg ELSE 0 END) AS novo_projeto_kg,
-               SUM(CASE WHEN tipo_receita = 'FORECAST' THEN qtd_pendente_kg ELSE 0 END) AS forecast_kg
+               SUM(CASE WHEN tipo_receita IN ('VENDA_FIRME','DEVOLUCAO') THEN peso_liquido ELSE 0 END) AS venda_firme_kg,
+               SUM(CASE WHEN tipo_receita = 'NOVO_PROJETO' THEN peso_liquido ELSE 0 END) AS novo_projeto_kg,
+               SUM(CASE WHEN tipo_receita = 'FORECAST' THEN peso_liquido ELSE 0 END) AS forecast_kg
         FROM dbo.fato_vendas
         WHERE {real_where}
         GROUP BY COALESCE(NULLIF(LTRIM(RTRIM(mercado_vendas)), ''), 'Sem mercado informado')
@@ -7124,9 +7178,9 @@ def _vg_evolucao_mensal(f: dict, realizado_disponivel: bool) -> list[dict]:
                    SUM(CASE WHEN tipo_receita IN ('VENDA_FIRME','DEVOLUCAO') THEN valor_pendente + COALESCE(vlr_st, 0) ELSE 0 END) AS venda_firme_rs,
                    SUM(CASE WHEN tipo_receita = 'NOVO_PROJETO' THEN valor_pendente + COALESCE(vlr_st, 0) ELSE 0 END) AS novo_projeto_rs,
                    SUM(CASE WHEN tipo_receita = 'FORECAST' THEN valor_pendente + COALESCE(vlr_st, 0) ELSE 0 END) AS forecast_rs,
-                   SUM(CASE WHEN tipo_receita IN ('VENDA_FIRME','DEVOLUCAO') THEN qtd_pendente_kg ELSE 0 END) AS venda_firme_kg,
-                   SUM(CASE WHEN tipo_receita = 'NOVO_PROJETO' THEN qtd_pendente_kg ELSE 0 END) AS novo_projeto_kg,
-                   SUM(CASE WHEN tipo_receita = 'FORECAST' THEN qtd_pendente_kg ELSE 0 END) AS forecast_kg
+                   SUM(CASE WHEN tipo_receita IN ('VENDA_FIRME','DEVOLUCAO') THEN peso_liquido ELSE 0 END) AS venda_firme_kg,
+                   SUM(CASE WHEN tipo_receita = 'NOVO_PROJETO' THEN peso_liquido ELSE 0 END) AS novo_projeto_kg,
+                   SUM(CASE WHEN tipo_receita = 'FORECAST' THEN peso_liquido ELSE 0 END) AS forecast_kg
             FROM dbo.fato_vendas
             WHERE {' AND '.join(real_parts)}
             GROUP BY MONTH(dt_entrega_cliente)

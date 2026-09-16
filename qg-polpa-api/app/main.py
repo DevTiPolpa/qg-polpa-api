@@ -47,7 +47,9 @@ app = FastAPI(
 
 @app.on_event("startup")
 def _iniciar_scheduler() -> None:
+    from app.database import _ensure_fato_vendas_peso_liquido_column
     from app.scheduler import iniciar_scheduler_snapshot_semanal, iniciar_scheduler_tarefas_vencidas
+    _ensure_fato_vendas_peso_liquido_column()
     iniciar_scheduler_snapshot_semanal()
     iniciar_scheduler_tarefas_vencidas()
 
