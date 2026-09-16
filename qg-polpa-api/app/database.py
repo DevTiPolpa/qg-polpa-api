@@ -897,9 +897,14 @@ def list_metas_vendedores_original(filtros: dict | None = None) -> list[dict]:
     parts: list[str] = []
     params: list[Any] = []
 
+    # dbo.metas_2026.mercado_vendas está sempre NULL (a meta não é definida por
+    # mercado) — _normalize_filtros preenche f["mercados"] com os 3 mercados
+    # permitidos mesmo sem seleção do usuário (para filtrar fato_vendas nas
+    # outras consultas desta tela), o que aqui zerava sempre as metas via
+    # "mercado_vendas IN (...)" contra uma coluna 100% NULL. Metas não são
+    # filtradas por mercado.
     for column, values in [
         ("projeto", f["projetos"]),
-        ("mercado_vendas", f["mercados"]),
         ("nome_vendedor", f["vendedores"]),
     ]:
         clause = _build_in_clause(column, values, params)
