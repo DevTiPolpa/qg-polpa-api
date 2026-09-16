@@ -7101,10 +7101,14 @@ def get_visao_global_resumo(filtros: dict | None = None) -> dict:
     kpis = {
         "orcamentoTotalRS": total_orcamento_rs,
         "realizadoTotalRS": total_realizado_rs if realizado_disponivel else None,
-        "desvioRS": (total_realizado_rs - total_orcamento_rs) if realizado_disponivel else None,
-        "atingimentoPct": (total_realizado_rs / total_orcamento_rs) if (realizado_disponivel and total_orcamento_rs) else None,
+        # Desvio R$/Atingimento/Realizado KG usam a "Previsão Total" (Vendas Firmes +
+        # Novos Projetos + Forecast) como base de comparação com o Orçado — mesmo
+        # conceito do card "Previsão Total" e das colunas "Previsão Total" da tabela
+        # por mercado, e não mais o Realizado filtrado pelo card de tipo selecionado.
+        "desvioRS": (total_previsao_total_rs - total_orcamento_rs) if realizado_disponivel else None,
+        "atingimentoPct": (total_previsao_total_rs / total_orcamento_rs) if (realizado_disponivel and total_orcamento_rs) else None,
         "orcamentoKG": total_orcamento_kg,
-        "realizadoKG": total_realizado_kg if realizado_disponivel else None,
+        "realizadoKG": total_previsao_total_kg if realizado_disponivel else None,
         "vendaFirmeTotalRS": total_venda_firme_rs if realizado_disponivel else None,
         "novoProjetoTotalRS": total_novo_projeto_rs if realizado_disponivel else None,
         "forecastTotalRS": total_forecast_rs if realizado_disponivel else None,
