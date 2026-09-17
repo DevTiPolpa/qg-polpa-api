@@ -3176,9 +3176,15 @@ def get_snapshot_historico_produtos(cod_parc: int, filtros: dict | None = None) 
 
 
 def criar_forecast_snapshot() -> dict:
+    """Idempotente por snapshot_date: apaga qualquer congelamento já existente para o
+    dia antes de inserir. Sem isso, duas chamadas para a mesma data (ex.: uma corrida
+    entre threads do scheduler em processos que se sobrepõem durante um restart/reload)
+    duplicam silenciosamente todos os valores do dia (visto em produção em 2026-09-16:
+    todas as linhas apareciam exatamente 2x, dobrando os totais do Comparativo Semanal)."""
     snapshot_date = datetime.now().strftime("%Y-%m-%d")
     conn = get_connection()
     cursor = conn.cursor()
+    cursor.execute("DELETE FROM dbo.forecast_snapshots WHERE snapshot_date = ?", snapshot_date)
     cursor.execute(
         """
         INSERT INTO dbo.forecast_snapshots
