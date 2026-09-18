@@ -5474,12 +5474,35 @@ def _mov_date(value: Any) -> str | None:
 
 def _mov_filtros_clause(alias: str, mercados: list[str] | None, vendedores: list[str] | None, params: list[Any]) -> str:
     """Monta as cláusulas opcionais de Mercado de Vendas e Vendedor (multi-seleção,
-    padrão IN (...) já usado no resto do backend) e retorna prontas para concatenar no WHERE."""
+    padrão IN (...) já usado no resto do backend) e retorna prontas para concatenar no WHERE.
+    Usada só nos endpoints de detalhe (produtos de um cliente / clientes de um produto),
+    que listam um único ano já sem nenhuma classificação — aqui filtrar direto por
+    vendedor é correto.
+
+    Movimentação de Clientes e Produtos está restrita aos mercados de
+    MERCADOS_PERMITIDOS_DASHBOARD, mesmo padrão das outras 6 telas (Dashboard,
+    Tarefas, Por Vendedor, Novos Projetos, Histórico Clientes, Comparativo Semanal,
+    Recorrentes R x O)."""
     clauses = [
-        _build_in_clause(f"{alias}.mercado_vendas", _split_filter(mercados), params),
+        _build_in_clause(f"{alias}.mercado_vendas", _restringir_mercados_permitidos(_split_filter(mercados)), params),
         _build_in_clause(f"{alias}.nome_vendedor", _split_filter(vendedores), params),
     ]
     return "".join(f" AND {clause}" for clause in clauses if clause)
+
+
+def _mov_mercado_clause(alias: str, mercados: list[str] | None, params: list[Any]) -> str:
+    """Só a cláusula de Mercado de Vendas (sem vendedor) — usada nas consultas de
+    classificação Aberto/Perdido e Lançado/Descontinuado (get_movimentacao_clientes e
+    get_movimentacao_produtos).
+
+    Vendedor NÃO pode entrar aqui: a classificação precisa ser "a empresa comprou/vendeu
+    isso, em qualquer vendedor" — um cliente que só trocou de vendedor de um ano pro
+    outro continua sendo cliente da empresa, não "perdido"; um produto vendido por outro
+    vendedor no ano seguinte não foi "descontinuado". O filtro de vendedor é aplicado
+    depois, em Python, sobre o vendedor responsável já calculado por linha (não sobre os
+    dados brutos usados pra decidir se o cliente/produto existiu naquele ano)."""
+    clause = _build_in_clause(f"{alias}.mercado_vendas", _restringir_mercados_permitidos(_split_filter(mercados)), params)
+    return f" AND {clause}" if clause else ""
 
 
 def get_movimentacao_clientes(
@@ -5497,7 +5520,7 @@ def get_movimentacao_clientes(
     """
     ano_anterior = ano - 1
     params: list[Any] = [ano, ano_anterior]
-    filtros_clause = _mov_filtros_clause("fv", mercados, vendedores, params)
+    mercado_clause = _mov_mercado_clause("fv", mercados, params)
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute(
@@ -5517,7 +5540,7 @@ def get_movimentacao_clientes(
               AND (fv.cod_top IS NULL OR fv.cod_top != 1023)
               AND (fv.[top] IS NULL OR fv.[top] NOT LIKE '%ESTOQUE MINIM%')
               AND (fv.[top] IS NULL OR fv.[top] NOT IN ('PEDIDO DE VENDA - BONIFICAÇÃO', 'VENDA NF-E + BONIFICAÇÃO', 'DEV PROPRIA - DE REMESSA EM BONIFICAÇÃO', 'DEVOLUÇÃO DE REMESSA EM BONIFICAÇÃO', 'REMESSA DE BONIFICAÇÃO - SAIDA'))
-              {filtros_clause}
+              {mercado_clause}
         ),
         ranked AS (
             SELECT *,
@@ -5548,6 +5571,11 @@ def get_movimentacao_clientes(
         cod_parc = _mov_int(row.cod_parc)
         (atual if _mov_int(row.ano) == ano else anterior)[cod_parc] = row
 
+    # Filtro de vendedor: aplicado aqui, sobre o vendedor já apurado por linha — não na
+    # consulta SQL acima — pra não confundir "cliente trocou de vendedor" com "cliente
+    # foi perdido pela empresa" (ver comentário de _mov_mercado_clause).
+    vendedores_filtro = set(_split_filter(vendedores)) or None
+
     abertos = [
         {
             "codParc": cod_parc,
@@ -5560,6 +5588,7 @@ def get_movimentacao_clientes(
         }
         for cod_parc, row in atual.items()
         if cod_parc not in anterior
+        and (vendedores_filtro is None or row.vendedor_ultima_compra in vendedores_filtro)
     ]
     abertos.sort(key=lambda r: r["faturamento"], reverse=True)
 
@@ -5567,6 +5596,8 @@ def get_movimentacao_clientes(
     perdidos = []
     for cod_parc, row in anterior.items():
         if cod_parc in atual:
+            continue
+        if vendedores_filtro is not None and row.vendedor_ultima_compra not in vendedores_filtro:
             continue
         ultima_compra = _mov_date(row.ultima_compra)
         dias_sem_comprar = None
@@ -5598,10 +5629,15 @@ def get_movimentacao_produtos(
 ) -> dict:
     """Produtos Lançados (venda só no ano selecionado) e Descontinuados (venda só no ano
     anterior). Mesma estratégia de get_movimentacao_clientes: uma consulta agregada por
-    produto x ano cobre as duas visões."""
+    produto x ano cobre as duas visões.
+
+    Vendedor NÃO filtra essa consulta (ver _mov_mercado_clause) — um produto vendido por
+    outro vendedor no ano seguinte não foi "descontinuado" pela empresa. Quando um
+    vendedor é selecionado, ele só restringe quais produtos aparecem na lista (produtos
+    que esse vendedor efetivamente vendeu no ano relevante), apurado à parte."""
     ano_anterior = ano - 1
     params: list[Any] = [ano, ano_anterior]
-    filtros_clause = _mov_filtros_clause("fv", mercados, vendedores, params)
+    mercado_clause = _mov_mercado_clause("fv", mercados, params)
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute(
@@ -5622,7 +5658,7 @@ def get_movimentacao_produtos(
           AND (fv.cod_top IS NULL OR fv.cod_top != 1023)
           AND (fv.[top] IS NULL OR fv.[top] NOT LIKE '%ESTOQUE MINIM%')
           AND (fv.[top] IS NULL OR fv.[top] NOT IN ('PEDIDO DE VENDA - BONIFICAÇÃO', 'VENDA NF-E + BONIFICAÇÃO', 'DEV PROPRIA - DE REMESSA EM BONIFICAÇÃO', 'DEVOLUÇÃO DE REMESSA EM BONIFICAÇÃO', 'REMESSA DE BONIFICAÇÃO - SAIDA'))
-          {filtros_clause}
+          {mercado_clause}
         GROUP BY fv.cod_produto, dp.nome_produto, fv.nome_produto, fv.grupo_produto, YEAR(fv.dt_entrega_cliente)
         """,
         params,
@@ -5637,6 +5673,38 @@ def get_movimentacao_produtos(
         cod_produto = _mov_int(row.cod_produto)
         (atual if _mov_int(row.ano) == ano else anterior)[cod_produto] = row
 
+    # Produtos efetivamente vendidos pelo(s) vendedor(es) selecionado(s) em cada ano —
+    # usado só pra filtrar a lista final (não pra decidir lançado/descontinuado).
+    produtos_do_vendedor_atual: set[int] | None = None
+    produtos_do_vendedor_anterior: set[int] | None = None
+    vendedores_split = _split_filter(vendedores)
+    if vendedores_split:
+        vparams: list[Any] = [ano, ano_anterior]
+        vendedor_clause = _build_in_clause("fv.nome_vendedor", vendedores_split, vparams)
+        mercado_clause_v = _mov_mercado_clause("fv", mercados, vparams)
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            f"""
+            SELECT DISTINCT fv.cod_produto AS cod_produto, YEAR(fv.dt_entrega_cliente) AS ano
+            FROM dbo.fato_vendas fv
+            WHERE YEAR(fv.dt_entrega_cliente) IN (?, ?)
+              AND (fv.cod_top IS NULL OR fv.cod_top != 1023)
+              AND (fv.[top] IS NULL OR fv.[top] NOT LIKE '%ESTOQUE MINIM%')
+              AND (fv.[top] IS NULL OR fv.[top] NOT IN ('PEDIDO DE VENDA - BONIFICAÇÃO', 'VENDA NF-E + BONIFICAÇÃO', 'DEV PROPRIA - DE REMESSA EM BONIFICAÇÃO', 'DEVOLUÇÃO DE REMESSA EM BONIFICAÇÃO', 'REMESSA DE BONIFICAÇÃO - SAIDA'))
+              AND {vendedor_clause}
+              {mercado_clause_v}
+            """,
+            vparams,
+        )
+        produtos_do_vendedor_atual = set()
+        produtos_do_vendedor_anterior = set()
+        for row in cursor.fetchall():
+            cod_produto = _mov_int(row.cod_produto)
+            (produtos_do_vendedor_atual if _mov_int(row.ano) == ano else produtos_do_vendedor_anterior).add(cod_produto)
+        cursor.close()
+        conn.close()
+
     def _serialize(cod_produto: int, row: Any) -> dict:
         return {
             "codProduto": cod_produto,
@@ -5649,10 +5717,16 @@ def get_movimentacao_produtos(
             "ultimaVenda": _mov_date(row.ultima_venda),
         }
 
-    lancados = [_serialize(cod, row) for cod, row in atual.items() if cod not in anterior]
+    lancados = [
+        _serialize(cod, row) for cod, row in atual.items()
+        if cod not in anterior and (produtos_do_vendedor_atual is None or cod in produtos_do_vendedor_atual)
+    ]
     lancados.sort(key=lambda r: r["faturamento"], reverse=True)
 
-    descontinuados = [_serialize(cod, row) for cod, row in anterior.items() if cod not in atual]
+    descontinuados = [
+        _serialize(cod, row) for cod, row in anterior.items()
+        if cod not in atual and (produtos_do_vendedor_anterior is None or cod in produtos_do_vendedor_anterior)
+    ]
     descontinuados.sort(key=lambda r: r["faturamento"], reverse=True)
 
     return {
