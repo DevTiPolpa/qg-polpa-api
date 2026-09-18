@@ -2809,6 +2809,9 @@ def api_update_task(task_id: int, payload: TaskUpdateRequest, request: Request):
         raise HTTPException(status_code=400, detail="Status inválido.")
     body = {k: v for k, v in payload.model_dump(exclude_unset=True).items() if v is not None}
 
+    if "prazo" in body and str(user.get("role", "")).lower() != "admin":
+        raise HTTPException(status_code=403, detail="Apenas administradores podem alterar o prazo da tarefa.")
+
     if "tipoOcorrencia" in body:
         try:
             atual = get_task(task_id)
