@@ -598,6 +598,19 @@ def _normalize_filtros(filtros: dict | None) -> dict:
     }
 
 
+# Cód. Tops (Tipo de Operação) que NÃO são venda de fato — desconsiderados de toda soma
+# de vendas do sistema via "cod_top NOT IN (...)" (ver build_fato_vendas_where e demais
+# consultas que replicam esse mesmo filtro):
+#   1023 - ESTOQUE MINIM (ajuste interno de estoque)
+#   1152 - TRANSFERENCIA ENTRE FILIAIS - SAIDA (movimentação interna, não venda)
+#   1022 - PEDIDO DE VENDA - AMOSTRAS (amostra, não venda)
+#   3031 - REMESSA DE DOAÇÃO BRINDE (doação, não venda)
+#   1171 - REMESSA AMOSTRA GRATIS - BAIXA ESTOQUE (amostra grátis, não venda;
+#          sem ocorrências na base até a inclusão deste filtro, mantido preventivamente)
+# Exclusão numérica por cod_top — não por texto do [top] — porque é o identificador
+# canônico e evita problemas de acentuação/grafia da coluna [top] (ex.: "DOAÇÃO" tem
+# um problema de codificação isolado nessa tabela que corrompe a comparação por texto).
+
 # Tops (Tipo de Operação) que representam bonificação (mercadoria dada/devolvida
 # de graça, não venda de fato) — desconsiderados de toda soma de vendas do
 # sistema, tanto o lado de saída quanto o de devolução da bonificação.
@@ -652,7 +665,7 @@ def build_fato_vendas_where(filtros: dict | None, alias: str = "fv") -> tuple[st
         parts.append(f"{alias}.uf = ?")
         params.append(f["uf"])
 
-    parts.append(f"({alias}.cod_top IS NULL OR {alias}.cod_top != 1023)")
+    parts.append(f"({alias}.cod_top IS NULL OR {alias}.cod_top NOT IN (1023, 1152, 1022, 3031, 1171))")
     parts.append(f"({alias}.[top] IS NULL OR {alias}.[top] NOT LIKE '%ESTOQUE MINIM%')")
     parts.append(
         f"({alias}.[top] IS NULL OR {alias}.[top] NOT IN "
@@ -1283,7 +1296,7 @@ def _dash_build_fato_where(filtros: dict | None, alias: str = "fv", ignore_tipo_
         parts.append(f"{alias}.uf = ?")
         params.append(f["uf"])
 
-    parts.append(f"({alias}.cod_top IS NULL OR {alias}.cod_top != 1023)")
+    parts.append(f"({alias}.cod_top IS NULL OR {alias}.cod_top NOT IN (1023, 1152, 1022, 3031, 1171))")
     parts.append(f"({alias}.[top] IS NULL OR {alias}.[top] NOT LIKE '%ESTOQUE MINIM%')")
     parts.append(
         f"({alias}.[top] IS NULL OR {alias}.[top] NOT IN "
@@ -2059,7 +2072,7 @@ def _np_build_fato_where(filtros: dict | None, alias: str = "fv", include_date: 
         params.append(f["uf"])
 
     parts.append(f"{alias}.projeto IN ('NOVOS PROJETOS', 'TESTE INDUSTRIAL')")
-    parts.append(f"({alias}.cod_top IS NULL OR {alias}.cod_top != 1023)")
+    parts.append(f"({alias}.cod_top IS NULL OR {alias}.cod_top NOT IN (1023, 1152, 1022, 3031, 1171))")
     parts.append(f"({alias}.[top] IS NULL OR {alias}.[top] NOT LIKE '%ESTOQUE MINIM%')")
     parts.append(
         f"({alias}.[top] IS NULL OR {alias}.[top] NOT IN "
@@ -2096,7 +2109,7 @@ WITH primeiros AS (
     FROM dbo.fato_vendas
     WHERE projeto IN ('NOVOS PROJETOS', 'TESTE INDUSTRIAL')
       AND dt_entrega_cliente IS NOT NULL
-      AND (cod_top IS NULL OR cod_top != 1023)
+      AND (cod_top IS NULL OR cod_top NOT IN (1023, 1152, 1022, 3031, 1171))
       AND ([top] IS NULL OR [top] NOT LIKE '%ESTOQUE MINIM%')
       AND ([top] IS NULL OR [top] NOT IN ('PEDIDO DE VENDA - BONIFICAÇÃO', 'VENDA NF-E + BONIFICAÇÃO', 'DEV PROPRIA - DE REMESSA EM BONIFICAÇÃO', 'DEVOLUÇÃO DE REMESSA EM BONIFICAÇÃO', 'REMESSA DE BONIFICAÇÃO - SAIDA'))
     GROUP BY cod_parc, cod_produto
@@ -2506,7 +2519,7 @@ def _hc_build_where(filtros: dict | None = None, alias: str = "fv") -> tuple[str
     f = _hc_normalize_filtros(filtros)
     parts = [
         f"{alias}.tipo_receita IN ('VENDA_FIRME', 'DEVOLUCAO')",
-        f"({alias}.cod_top IS NULL OR {alias}.cod_top != 1023)",
+        f"({alias}.cod_top IS NULL OR {alias}.cod_top NOT IN (1023, 1152, 1022, 3031, 1171))",
         f"({alias}.[top] IS NULL OR {alias}.[top] NOT LIKE '%ESTOQUE MINIM%')",
         f"({alias}.[top] IS NULL OR {alias}.[top] NOT IN "
         "('PEDIDO DE VENDA - BONIFICAÇÃO', 'VENDA NF-E + BONIFICAÇÃO', "
@@ -2574,7 +2587,7 @@ def get_historico_clientes_filtros() -> dict:
         FROM fato_vendas
         WHERE dt_entrega_cliente IS NOT NULL
           AND tipo_receita IN ('VENDA_FIRME','DEVOLUCAO')
-          AND (cod_top IS NULL OR cod_top != 1023)
+          AND (cod_top IS NULL OR cod_top NOT IN (1023, 1152, 1022, 3031, 1171))
           AND ([top] IS NULL OR [top] NOT LIKE '%ESTOQUE MINIM%')
           AND ([top] IS NULL OR [top] NOT IN ('PEDIDO DE VENDA - BONIFICAÇÃO', 'VENDA NF-E + BONIFICAÇÃO', 'DEV PROPRIA - DE REMESSA EM BONIFICAÇÃO', 'DEVOLUÇÃO DE REMESSA EM BONIFICAÇÃO', 'REMESSA DE BONIFICAÇÃO - SAIDA'))
         ORDER BY ano DESC
@@ -2588,7 +2601,7 @@ def get_historico_clientes_filtros() -> dict:
         FROM fato_vendas fv
         LEFT JOIN dim_cliente dc ON fv.cod_parc = dc.cod_parc
         WHERE fv.tipo_receita IN ('VENDA_FIRME','DEVOLUCAO')
-          AND (fv.cod_top IS NULL OR fv.cod_top != 1023)
+          AND (fv.cod_top IS NULL OR fv.cod_top NOT IN (1023, 1152, 1022, 3031, 1171))
           AND (fv.[top] IS NULL OR fv.[top] NOT LIKE '%ESTOQUE MINIM%')
           AND (fv.[top] IS NULL OR fv.[top] NOT IN ('PEDIDO DE VENDA - BONIFICAÇÃO', 'VENDA NF-E + BONIFICAÇÃO', 'DEV PROPRIA - DE REMESSA EM BONIFICAÇÃO', 'DEVOLUÇÃO DE REMESSA EM BONIFICAÇÃO', 'REMESSA DE BONIFICAÇÃO - SAIDA'))
         GROUP BY fv.cod_parc
@@ -2601,7 +2614,7 @@ def get_historico_clientes_filtros() -> dict:
         FROM fato_vendas
         WHERE mercado_vendas IS NOT NULL
           AND tipo_receita IN ('VENDA_FIRME','DEVOLUCAO')
-          AND (cod_top IS NULL OR cod_top != 1023)
+          AND (cod_top IS NULL OR cod_top NOT IN (1023, 1152, 1022, 3031, 1171))
           AND ([top] IS NULL OR [top] NOT LIKE '%ESTOQUE MINIM%')
           AND ([top] IS NULL OR [top] NOT IN ('PEDIDO DE VENDA - BONIFICAÇÃO', 'VENDA NF-E + BONIFICAÇÃO', 'DEV PROPRIA - DE REMESSA EM BONIFICAÇÃO', 'DEVOLUÇÃO DE REMESSA EM BONIFICAÇÃO', 'REMESSA DE BONIFICAÇÃO - SAIDA'))
         ORDER BY mercado
@@ -2613,7 +2626,7 @@ def get_historico_clientes_filtros() -> dict:
         FROM fato_vendas
         WHERE grupo_produto IS NOT NULL
           AND tipo_receita IN ('VENDA_FIRME','DEVOLUCAO')
-          AND (cod_top IS NULL OR cod_top != 1023)
+          AND (cod_top IS NULL OR cod_top NOT IN (1023, 1152, 1022, 3031, 1171))
           AND ([top] IS NULL OR [top] NOT LIKE '%ESTOQUE MINIM%')
           AND ([top] IS NULL OR [top] NOT IN ('PEDIDO DE VENDA - BONIFICAÇÃO', 'VENDA NF-E + BONIFICAÇÃO', 'DEV PROPRIA - DE REMESSA EM BONIFICAÇÃO', 'DEVOLUÇÃO DE REMESSA EM BONIFICAÇÃO', 'REMESSA DE BONIFICAÇÃO - SAIDA'))
         ORDER BY grupo
@@ -2625,7 +2638,7 @@ def get_historico_clientes_filtros() -> dict:
         FROM fato_vendas
         WHERE nome_vendedor IS NOT NULL
           AND tipo_receita IN ('VENDA_FIRME','DEVOLUCAO')
-          AND (cod_top IS NULL OR cod_top != 1023)
+          AND (cod_top IS NULL OR cod_top NOT IN (1023, 1152, 1022, 3031, 1171))
           AND ([top] IS NULL OR [top] NOT LIKE '%ESTOQUE MINIM%')
           AND ([top] IS NULL OR [top] NOT IN ('PEDIDO DE VENDA - BONIFICAÇÃO', 'VENDA NF-E + BONIFICAÇÃO', 'DEV PROPRIA - DE REMESSA EM BONIFICAÇÃO', 'DEVOLUÇÃO DE REMESSA EM BONIFICAÇÃO', 'REMESSA DE BONIFICAÇÃO - SAIDA'))
         ORDER BY vendedor
@@ -3209,7 +3222,7 @@ def criar_forecast_snapshot() -> dict:
         FROM dbo.fato_vendas fv
         LEFT JOIN dbo.dim_cliente dc ON fv.cod_parc = dc.cod_parc
         LEFT JOIN dbo.dim_produto dp ON fv.cod_produto = dp.cod_produto
-        WHERE (fv.cod_top IS NULL OR fv.cod_top != 1023)
+        WHERE (fv.cod_top IS NULL OR fv.cod_top NOT IN (1023, 1152, 1022, 3031, 1171))
           AND (fv.[top] IS NULL OR fv.[top] NOT LIKE '%ESTOQUE MINIM%')
           AND (fv.[top] IS NULL OR fv.[top] NOT IN ('PEDIDO DE VENDA - BONIFICAÇÃO', 'VENDA NF-E + BONIFICAÇÃO', 'DEV PROPRIA - DE REMESSA EM BONIFICAÇÃO', 'DEVOLUÇÃO DE REMESSA EM BONIFICAÇÃO', 'REMESSA DE BONIFICAÇÃO - SAIDA'))
         GROUP BY fv.cod_parc, dc.razao_social, fv.RAZAOSOCIAL, fv.cod_produto,
@@ -3235,7 +3248,7 @@ def _build_recorrentes_real_where(filtros: dict | None, alias: str = "fv") -> tu
     f = _normalize_filtros(filtros)
     parts: list[str] = [
         f"{alias}.projeto = 'RECORRENTES'",
-        f"({alias}.cod_top IS NULL OR {alias}.cod_top != 1023)",
+        f"({alias}.cod_top IS NULL OR {alias}.cod_top NOT IN (1023, 1152, 1022, 3031, 1171))",
         f"({alias}.[top] IS NULL OR {alias}.[top] NOT LIKE '%ESTOQUE MINIM%')",
         f"({alias}.[top] IS NULL OR {alias}.[top] NOT IN "
         "('PEDIDO DE VENDA - BONIFICAÇÃO', 'VENDA NF-E + BONIFICAÇÃO', "
@@ -4998,7 +5011,7 @@ def get_funil_scorecard_periodos(hoje: date | None = None) -> dict:
 
 
 _SC_COD_TOP_FILTER = (
-    "(cod_top IS NULL OR cod_top <> 1023) "
+    "(cod_top IS NULL OR cod_top NOT IN (1023, 1152, 1022, 3031, 1171)) "
     "AND ([top] IS NULL OR [top] NOT LIKE '%ESTOQUE MINIM%') "
     "AND ([top] IS NULL OR [top] NOT IN "
     "('PEDIDO DE VENDA - BONIFICAÇÃO', 'VENDA NF-E + BONIFICAÇÃO', "
@@ -5537,7 +5550,7 @@ def get_movimentacao_clientes(
             FROM dbo.fato_vendas fv
             LEFT JOIN dbo.dim_cliente dc ON fv.cod_parc = dc.cod_parc
             WHERE YEAR(fv.dt_entrega_cliente) IN (?, ?)
-              AND (fv.cod_top IS NULL OR fv.cod_top != 1023)
+              AND (fv.cod_top IS NULL OR fv.cod_top NOT IN (1023, 1152, 1022, 3031, 1171))
               AND (fv.[top] IS NULL OR fv.[top] NOT LIKE '%ESTOQUE MINIM%')
               AND (fv.[top] IS NULL OR fv.[top] NOT IN ('PEDIDO DE VENDA - BONIFICAÇÃO', 'VENDA NF-E + BONIFICAÇÃO', 'DEV PROPRIA - DE REMESSA EM BONIFICAÇÃO', 'DEVOLUÇÃO DE REMESSA EM BONIFICAÇÃO', 'REMESSA DE BONIFICAÇÃO - SAIDA'))
               {mercado_clause}
@@ -5655,7 +5668,7 @@ def get_movimentacao_produtos(
         FROM dbo.fato_vendas fv
         LEFT JOIN dbo.dim_produto dp ON fv.cod_produto = dp.cod_produto
         WHERE YEAR(fv.dt_entrega_cliente) IN (?, ?)
-          AND (fv.cod_top IS NULL OR fv.cod_top != 1023)
+          AND (fv.cod_top IS NULL OR fv.cod_top NOT IN (1023, 1152, 1022, 3031, 1171))
           AND (fv.[top] IS NULL OR fv.[top] NOT LIKE '%ESTOQUE MINIM%')
           AND (fv.[top] IS NULL OR fv.[top] NOT IN ('PEDIDO DE VENDA - BONIFICAÇÃO', 'VENDA NF-E + BONIFICAÇÃO', 'DEV PROPRIA - DE REMESSA EM BONIFICAÇÃO', 'DEVOLUÇÃO DE REMESSA EM BONIFICAÇÃO', 'REMESSA DE BONIFICAÇÃO - SAIDA'))
           {mercado_clause}
@@ -5689,7 +5702,7 @@ def get_movimentacao_produtos(
             SELECT DISTINCT fv.cod_produto AS cod_produto, YEAR(fv.dt_entrega_cliente) AS ano
             FROM dbo.fato_vendas fv
             WHERE YEAR(fv.dt_entrega_cliente) IN (?, ?)
-              AND (fv.cod_top IS NULL OR fv.cod_top != 1023)
+              AND (fv.cod_top IS NULL OR fv.cod_top NOT IN (1023, 1152, 1022, 3031, 1171))
               AND (fv.[top] IS NULL OR fv.[top] NOT LIKE '%ESTOQUE MINIM%')
               AND (fv.[top] IS NULL OR fv.[top] NOT IN ('PEDIDO DE VENDA - BONIFICAÇÃO', 'VENDA NF-E + BONIFICAÇÃO', 'DEV PROPRIA - DE REMESSA EM BONIFICAÇÃO', 'DEVOLUÇÃO DE REMESSA EM BONIFICAÇÃO', 'REMESSA DE BONIFICAÇÃO - SAIDA'))
               AND {vendedor_clause}
@@ -5761,7 +5774,7 @@ def get_movimentacao_cliente_produtos(
         LEFT JOIN dbo.dim_produto dp ON fv.cod_produto = dp.cod_produto
         WHERE fv.cod_parc = ?
           AND YEAR(fv.dt_entrega_cliente) = ?
-          AND (fv.cod_top IS NULL OR fv.cod_top != 1023)
+          AND (fv.cod_top IS NULL OR fv.cod_top NOT IN (1023, 1152, 1022, 3031, 1171))
           AND (fv.[top] IS NULL OR fv.[top] NOT LIKE '%ESTOQUE MINIM%')
           AND (fv.[top] IS NULL OR fv.[top] NOT IN ('PEDIDO DE VENDA - BONIFICAÇÃO', 'VENDA NF-E + BONIFICAÇÃO', 'DEV PROPRIA - DE REMESSA EM BONIFICAÇÃO', 'DEVOLUÇÃO DE REMESSA EM BONIFICAÇÃO', 'REMESSA DE BONIFICAÇÃO - SAIDA'))
           {filtros_clause}
@@ -5809,7 +5822,7 @@ def get_movimentacao_produto_clientes(
         LEFT JOIN dbo.dim_cliente dc ON fv.cod_parc = dc.cod_parc
         WHERE fv.cod_produto = ?
           AND YEAR(fv.dt_entrega_cliente) = ?
-          AND (fv.cod_top IS NULL OR fv.cod_top != 1023)
+          AND (fv.cod_top IS NULL OR fv.cod_top NOT IN (1023, 1152, 1022, 3031, 1171))
           AND (fv.[top] IS NULL OR fv.[top] NOT LIKE '%ESTOQUE MINIM%')
           AND (fv.[top] IS NULL OR fv.[top] NOT IN ('PEDIDO DE VENDA - BONIFICAÇÃO', 'VENDA NF-E + BONIFICAÇÃO', 'DEV PROPRIA - DE REMESSA EM BONIFICAÇÃO', 'DEVOLUÇÃO DE REMESSA EM BONIFICAÇÃO', 'REMESSA DE BONIFICAÇÃO - SAIDA'))
           {filtros_clause}
@@ -7012,7 +7025,7 @@ def get_visao_global_resumo(filtros: dict | None = None) -> dict:
         # Mesma exclusão de higiene de dados já aplicada em todo o resto do sistema
         # (build_fato_vendas_where/_dash_build_fato_where etc.) — cod_top=1023 e
         # "ESTOQUE MINIM" são ajustes internos, não vendas reais.
-        "(cod_top IS NULL OR cod_top != 1023)",
+        "(cod_top IS NULL OR cod_top NOT IN (1023, 1152, 1022, 3031, 1171))",
         "([top] IS NULL OR [top] NOT LIKE '%ESTOQUE MINIM%')",
         f"([top] IS NULL OR [top] NOT IN ({', '.join('?' for _ in TOPS_EXCLUIDOS_DA_VENDA)}))",
     ]
@@ -7255,7 +7268,7 @@ def _vg_evolucao_mensal(f: dict, realizado_disponivel: bool) -> list[dict]:
         real_parts = [
             "YEAR(dt_entrega_cliente) = ?",
             f"tipo_receita IN ({', '.join('?' for _ in VISAO_GLOBAL_TIPOS_RECEITA_REALIZADO)}, ?)",
-            "(cod_top IS NULL OR cod_top != 1023)",
+            "(cod_top IS NULL OR cod_top NOT IN (1023, 1152, 1022, 3031, 1171))",
             "([top] IS NULL OR [top] NOT LIKE '%ESTOQUE MINIM%')",
             f"([top] IS NULL OR [top] NOT IN ({', '.join('?' for _ in TOPS_EXCLUIDOS_DA_VENDA)}))",
         ]
