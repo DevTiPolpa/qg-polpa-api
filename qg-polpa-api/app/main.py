@@ -50,7 +50,15 @@ def _iniciar_scheduler() -> None:
     from app.database import _ensure_fato_vendas_peso_liquido_column
     from app.scheduler import iniciar_scheduler_snapshot_semanal, iniciar_scheduler_tarefas_vencidas
     _ensure_fato_vendas_peso_liquido_column()
-    iniciar_scheduler_snapshot_semanal()
+    # O congelamento semanal do forecast (dbo.forecast_snapshots) é compartilhado entre
+    # produção e qualquer instância de desenvolvimento apontando pro mesmo banco
+    # (DB_SERVER=10.10.98.1) -- se ambas ficarem de pé na quarta-feira às 14h30, as duas
+    # threads disparam criar_forecast_snapshot() quase ao mesmo tempo e duplicam todos
+    # os valores do dia (visto em 2026-09-16 e de novo em 2026-09-23). Só produção deve
+    # rodar esse agendador; em dev (APP_ENV=development), use o botão manual de admin
+    # (POST /api/snapshot/criar) quando precisar de um snapshot pra testar.
+    if os.getenv("APP_ENV", "").strip().lower() != "development":
+        iniciar_scheduler_snapshot_semanal()
     iniciar_scheduler_tarefas_vencidas()
 
 
