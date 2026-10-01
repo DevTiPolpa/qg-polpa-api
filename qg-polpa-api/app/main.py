@@ -2045,9 +2045,17 @@ def api_funil_vendas_evolucao_mensal(
 # Exige só sessão autenticada (admin ou vendedor) — sem checagem de role.
 # =============================================================================
 
-from app.database import get_funil_scorecard
+from app.database import (
+    get_funil_scorecard,
+    get_funil_scorecard_periodos,
+    get_funil_scorecard_cadencia_detalhe,
+    get_funil_scorecard_saude_detalhe,
+)
 
 _FUNIL_SCORECARD_RECORTES_VALIDOS = ("semana_atual", "semana_anterior", "mes_atual", "mes_anterior")
+_FUNIL_SCORECARD_CADENCIA_RECORTES_VALIDOS = _FUNIL_SCORECARD_RECORTES_VALIDOS + ("semana_retrasada",)
+_FUNIL_SCORECARD_CADENCIA_METRICAS_VALIDAS = ("abertos", "ganhos", "perdidos", "avancaram")
+_FUNIL_SCORECARD_SAUDE_METRICAS_VALIDAS = ("ativos", "foraSla", "semFollowup")
 
 
 def _require_authenticated(request: Request) -> dict:
@@ -2065,6 +2073,34 @@ def api_funil_scorecard_dashboard(request: Request, recorte: str = "semana_anter
     return get_funil_scorecard(recorte)
 
 
+@app.get("/api/funil-scorecard/cadencia/detalhe", tags=["Placar Funil Comercial"])
+def api_funil_scorecard_cadencia_detalhe(
+    request: Request,
+    recorte: str = Query(...),
+    metrica: str = Query(...),
+    userId: int | None = Query(default=None),
+):
+    _require_authenticated(request)
+    if recorte not in _FUNIL_SCORECARD_CADENCIA_RECORTES_VALIDOS:
+        raise HTTPException(status_code=400, detail="Recorte inválido")
+    if metrica not in _FUNIL_SCORECARD_CADENCIA_METRICAS_VALIDAS:
+        raise HTTPException(status_code=400, detail="Métrica inválida")
+    periodo = get_funil_scorecard_periodos()[recorte]
+    return {"rows": get_funil_scorecard_cadencia_detalhe(periodo["start"], periodo["end"], metrica, userId)}
+
+
+@app.get("/api/funil-scorecard/saude/detalhe", tags=["Placar Funil Comercial"])
+def api_funil_scorecard_saude_detalhe(
+    request: Request,
+    metrica: str = Query(...),
+    userId: int | None = Query(default=None),
+):
+    _require_authenticated(request)
+    if metrica not in _FUNIL_SCORECARD_SAUDE_METRICAS_VALIDAS:
+        raise HTTPException(status_code=400, detail="Métrica inválida")
+    return {"rows": get_funil_scorecard_saude_detalhe(metrica, userId)}
+
+
 # =============================================================================
 # Panorama CRM — endpoints REST
 # =============================================================================
@@ -2075,6 +2111,8 @@ from app.database import (
     get_panorama_deals_snapshot,
     get_panorama_leads,
     get_panorama_deals,
+    get_panorama_leads_detalhe,
+    get_panorama_deals_detalhe,
 )
 
 
@@ -2165,6 +2203,36 @@ def api_panorama_crm_deals(
         _panorama_normalize_origem(origem),
         _panorama_parse_user_id(userId if userId is not None else user_id),
     )
+
+
+@app.get("/api/panorama-crm/leads/detalhe")
+def api_panorama_crm_leads_detalhe(
+    dateIni: str = Query(default="2026-01-01"),
+    dateFim: str = Query(default="2026-12-31"),
+    periodo: str = Query(...),
+    metrica: str = Query(...),
+    visao: str | None = Query(default="calendario"),
+):
+    return {"rows": get_panorama_leads_detalhe(dateIni, dateFim, periodo, metrica, _panorama_normalize_visao(visao))}
+
+
+@app.get("/api/panorama-crm/deals/detalhe")
+def api_panorama_crm_deals_detalhe(
+    periodo: str = Query(...),
+    metrica: str = Query(...),
+    visao: str | None = Query(default="calendario"),
+    pipelineId: str | None = None,
+    origem: str | None = None,
+    userId: str | None = None,
+):
+    return {"rows": get_panorama_deals_detalhe(
+        periodo,
+        metrica,
+        _panorama_normalize_visao(visao),
+        _panorama_parse_pipeline_id(pipelineId),
+        _panorama_normalize_origem(origem),
+        _panorama_parse_user_id(userId),
+    )}
 
 # =============================================================================
 # Agente IA / Chatbot — endpoints REST com agente SQL sobre produção

@@ -3963,6 +3963,55 @@ def get_panorama_leads(date_ini: str, date_fim: str, visao: str = "calendario") 
     }
 
 
+def get_panorama_leads_detalhe(date_ini: str, date_fim: str, periodo: str, metrica: str, visao: str = "calendario") -> list[dict]:
+    """Lista os leads por trás de uma célula da tabela de Geração de Demanda (Criados/
+    Movimentação/Convertidos/Perdidos), mesmos filtros de get_panorama_leads."""
+    visao_normalizada = _panorama_validar_visao(visao)
+
+    if metrica == "criados":
+        where = "FORMAT(TRY_CAST(date_create AS DATE), 'yyyy-MM') = ?"
+        params: list = [periodo]
+    elif metrica == "comMovimentacao":
+        where = "FORMAT(TRY_CAST(date_create AS DATE), 'yyyy-MM') = ? AND TRY_CAST(moved_time AS DATE) BETWEEN ? AND ?"
+        params = [periodo, date_ini, date_fim]
+    elif visao_normalizada == "coorte":
+        # Coorte: convertidos/perdidos contam pelo mês de CRIAÇÃO (destino final da leva),
+        # não pelo mês de fechamento — mesma lógica da query agregada (linhas ~3916-3937).
+        status_clause = "status_id = 'CONVERTED'" if metrica == "convertidos" else "status_semantic_id = 'F'"
+        where = f"FORMAT(TRY_CAST(date_create AS DATE), 'yyyy-MM') = ? AND {status_clause}"
+        params = [periodo]
+    elif metrica in ("convertidos", "perdidos"):
+        status_clause = "status_id = 'CONVERTED'" if metrica == "convertidos" else "status_semantic_id = 'F'"
+        where = f"FORMAT(TRY_CAST(date_closed AS DATE), 'yyyy-MM') = ? AND {status_clause}"
+        params = [periodo]
+    else:
+        raise ValueError(f"metrica inválida: {metrica}")
+
+    rows = fetch_all(
+        f"""
+        SELECT id, title AS titulo, assigned_by_id AS assignedById, opportunity AS valor,
+               status_description AS etapa, date_create, date_closed
+        FROM dbo.crm_leads
+        WHERE {where}
+        ORDER BY COALESCE(date_closed, date_create) DESC
+        """,
+        tuple(params),
+    )
+
+    vendedores = {v["id"]: v["nome"] for v in list_crm_mapping_vendedores_original()}
+    return [
+        {
+            "id": _int(row.get("id")),
+            "titulo": row.get("titulo") or "",
+            "vendedor": vendedores.get(_int(row.get("assignedById")), "?"),
+            "valor": _number(row.get("valor")),
+            "etapa": row.get("etapa"),
+            "data": _date_yyyy_mm_dd(row.get("date_closed") or row.get("date_create")),
+        }
+        for row in rows
+    ]
+
+
 def get_panorama_deals(
     date_ini: str,
     date_fim: str,
@@ -4093,6 +4142,65 @@ def get_panorama_deals(
             for row in rows_raw
         ]
     }
+
+
+def get_panorama_deals_detalhe(
+    periodo: str,
+    metrica: str,
+    visao: str = "calendario",
+    pipeline_id: int | None = None,
+    origem: str = "total",
+    user_id: int | None = None,
+) -> list[dict]:
+    """Lista os negócios por trás de uma célula de uma DealsSection (Criados/Ganhos/
+    Perdidos), mesmos filtros de get_panorama_deals."""
+    visao_normalizada = _panorama_validar_visao(visao)
+    pipeline_clause = _panorama_pipeline_clause(pipeline_id)
+    origem_clause = _panorama_origem_clause(origem)
+    params: list = [periodo]
+
+    if metrica == "criados":
+        where = "FORMAT(TRY_CAST(date_create AS DATE), 'yyyy-MM') = ?"
+    elif visao_normalizada == "coorte":
+        # Coorte: ganhos/perdidos contam pelo mês de CRIAÇÃO (destino final da leva),
+        # não pelo mês de fechamento — mesma lógica da query agregada acima.
+        semantic = "'S'" if metrica == "ganhos" else "'F'"
+        where = f"FORMAT(TRY_CAST(date_create AS DATE), 'yyyy-MM') = ? AND stage_semantic_id = {semantic}"
+    elif metrica in ("ganhos", "perdidos"):
+        semantic = "'S'" if metrica == "ganhos" else "'F'"
+        where = f"FORMAT(TRY_CAST(closedate AS DATE), 'yyyy-MM') = ? AND stage_semantic_id = {semantic}"
+    else:
+        raise ValueError(f"metrica inválida: {metrica}")
+
+    user_clause = _panorama_user_clause(user_id, params)
+
+    rows = fetch_all(
+        f"""
+        SELECT d.id AS id, d.title AS titulo, d.assigned_by_id AS assignedById, d.opportunity AS valor,
+               COALESCE(s.name, d.stage_id) AS etapa, d.date_create, d.closedate
+        FROM dbo.crm_deals d
+        LEFT JOIN dbo.crm_deal_stages s ON s.status_id = d.stage_id
+        WHERE {where}
+          AND {pipeline_clause}
+          {origem_clause}
+          {user_clause}
+        ORDER BY COALESCE(d.closedate, d.date_create) DESC
+        """,
+        tuple(params),
+    )
+
+    vendedores = {v["id"]: v["nome"] for v in list_crm_mapping_vendedores_original()}
+    return [
+        {
+            "id": _int(row.get("id")),
+            "titulo": row.get("titulo") or "",
+            "vendedor": vendedores.get(_int(row.get("assignedById")), "?"),
+            "valor": _number(row.get("valor")),
+            "etapa": row.get("etapa"),
+            "data": _date_yyyy_mm_dd(row.get("closedate") or row.get("date_create")),
+        }
+        for row in rows
+    ]
 
 # =============================================================================
 # Agente IA / Chatbot — persistência e ferramenta SQL Server de produção
@@ -5122,6 +5230,108 @@ def get_funil_scorecard_cadencia_range(start: str, end: str) -> list[dict]:
     return list(por_vendedor.values())
 
 
+def get_funil_scorecard_cadencia_detalhe(start: str, end: str, metrica: str, user_id: int | None) -> list[dict]:
+    """Lista os negócios por trás de uma célula da tabela de Cadência (Abertos/Ganhos/
+    Perdidos/Avançaram), mesmos filtros de get_funil_scorecard_cadencia_range."""
+    nomes_por_id = {v["id"]: v["nome"] for v in FUNIL_SCORECARD_VENDEDORES}
+    user_ids = (user_id,) if user_id is not None else FUNIL_SCORECARD_USER_IDS
+    ids_placeholders = ",".join("?" for _ in user_ids)
+    fuso_create = _sc_fuso_sql("d.date_create")
+    fuso_close = _sc_fuso_sql("d.closedate")
+
+    if metrica == "avancaram":
+        sort_case = _sc_sort_case_sql("h.stage_id")
+        fuso_hist = _sc_fuso_sql("created_time")
+        rows = fetch_all(
+            f"""
+            WITH hist AS (
+                SELECT h.deal_id, h.created_time,
+                       {sort_case} AS sort_atual,
+                       LAG({sort_case}) OVER (PARTITION BY h.deal_id ORDER BY h.created_time) AS sort_anterior
+                FROM dbo.crm_deal_stage_history h
+                JOIN dbo.crm_deals d ON d.id = h.deal_id
+                WHERE d.assigned_by_id IN ({ids_placeholders})
+                  AND (d.category_id = '0' OR d.category_id IS NULL)
+            ),
+            avancos AS (
+                SELECT deal_id, MAX(created_time) AS ultimo_avanco
+                FROM hist
+                WHERE {fuso_hist} >= ? AND {fuso_hist} < ?
+                  AND sort_anterior IS NOT NULL AND sort_atual > sort_anterior
+                GROUP BY deal_id
+            )
+            SELECT d.id AS id, d.title AS titulo, d.assigned_by_id AS userId, d.opportunity AS valor,
+                   COALESCE(s.name, d.stage_id) AS etapa, {_sc_fuso_sql('a.ultimo_avanco')} AS data
+            FROM avancos a
+            JOIN dbo.crm_deals d ON d.id = a.deal_id
+            LEFT JOIN dbo.crm_deal_stages s ON s.status_id = d.stage_id
+            ORDER BY a.ultimo_avanco DESC
+            """,
+            user_ids + (start, end),
+        )
+    else:
+        if metrica == "abertos":
+            filtro_data = f"{fuso_create} >= ? AND {fuso_create} < ?"
+        elif metrica == "ganhos":
+            filtro_data = f"d.stage_semantic_id = 'S' AND {fuso_close} >= ? AND {fuso_close} < ?"
+        elif metrica == "perdidos":
+            filtro_data = f"d.stage_id IN ('LOSE','3','8') AND {fuso_close} >= ? AND {fuso_close} < ?"
+        else:
+            raise ValueError(f"metrica inválida: {metrica}")
+
+        data_col = "d.date_create" if metrica == "abertos" else "d.closedate"
+        rows = fetch_all(
+            f"""
+            SELECT d.id AS id, d.title AS titulo, d.assigned_by_id AS userId, d.opportunity AS valor,
+                   COALESCE(s.name, d.stage_id) AS etapa, {_sc_fuso_sql(data_col)} AS data
+            FROM dbo.crm_deals d
+            LEFT JOIN dbo.crm_deal_stages s ON s.status_id = d.stage_id
+            WHERE d.assigned_by_id IN ({ids_placeholders})
+              AND (d.category_id = '0' OR d.category_id IS NULL)
+              AND {filtro_data}
+            ORDER BY {data_col} DESC
+            """,
+            user_ids + (start, end),
+        )
+
+    return [
+        {
+            "id": _int(row.get("id")),
+            "titulo": row.get("titulo") or "",
+            "vendedor": nomes_por_id.get(_int(row.get("userId")), "?"),
+            "valor": _number(row.get("valor")),
+            "etapa": row.get("etapa"),
+            "data": _date_yyyy_mm_dd(row.get("data")),
+        }
+        for row in rows
+    ]
+
+
+def _sc_enriquecer_saude(saude_raw: list[dict], hoje: date) -> list[dict]:
+    """Calcula diasNaFase/perfil/sla/foraDoSla por negócio — extraído de get_funil_scorecard
+    pra ser reaproveitado também pelo detalhe (get_funil_scorecard_saude_detalhe), sem
+    duplicar a regra de SLA."""
+
+    def _dias_na_fase(entrada_fase) -> int:
+        if entrada_fase is None:
+            return 0
+        if isinstance(entrada_fase, datetime):
+            entrada_fase = entrada_fase.date()
+        elif isinstance(entrada_fase, str):
+            entrada_fase = datetime.fromisoformat(entrada_fase).date()
+        return max((hoje - entrada_fase).days, 0)
+
+    enriquecidos = []
+    for d in saude_raw:
+        dias = _dias_na_fase(d["entradaFase"])
+        perfil = "B" if d["opportunity"] >= 150000 else "A"
+        sla_fase = FUNIL_SCORECARD_SLA.get(d["fase"])
+        sla = sla_fase[perfil] if sla_fase else None
+        fora_do_sla = sla is not None and dias > sla
+        enriquecidos.append({**d, "diasNaFase": dias, "perfil": perfil, "sla": sla, "foraDoSla": fora_do_sla})
+    return enriquecidos
+
+
 def get_funil_scorecard_saude_raw() -> list[dict]:
     fase_case = _sc_fase_case_sql("d.stage_id")
     entrada_fuso = _sc_fuso_sql("COALESCE(ef.entrada, d.date_create)")
@@ -5168,6 +5378,39 @@ def get_funil_scorecard_saude_raw() -> list[dict]:
             "temFollowup": bool(row.get("temFollowup")),
         }
         for row in rows
+    ]
+
+
+def get_funil_scorecard_saude_detalhe(metrica: str, user_id: int | None) -> list[dict]:
+    """Lista os negócios por trás de uma célula da tabela de Saúde (Ativos/Fora do SLA/
+    Sem follow-up), mesmo enriquecimento (_sc_enriquecer_saude) usado no agregado."""
+    nomes_por_id = {v["id"]: v["nome"] for v in FUNIL_SCORECARD_VENDEDORES}
+    hoje = _sc_agora_brasil()
+    enriquecidos = _sc_enriquecer_saude(get_funil_scorecard_saude_raw(), hoje)
+
+    # user_id=None é a linha TOTAL da tabela de Saúde, que soma os 4 vendedores do placar
+    # + "Outros (fora do placar)" -- por isso, ao contrário da Cadência, não filtra por
+    # FUNIL_SCORECARD_USER_IDS aqui (perderia os negócios de "Outros" e destoaria do total
+    # exibido na tela).
+    selecionados = enriquecidos if user_id is None else [d for d in enriquecidos if d["assignedById"] == user_id]
+    if metrica == "foraSla":
+        selecionados = [d for d in selecionados if d["foraDoSla"]]
+    elif metrica == "semFollowup":
+        selecionados = [d for d in selecionados if not d["temFollowup"]]
+    elif metrica != "ativos":
+        raise ValueError(f"metrica inválida: {metrica}")
+
+    selecionados.sort(key=lambda d: d["diasNaFase"], reverse=True)
+    return [
+        {
+            "id": d["id"],
+            "titulo": d["title"],
+            "vendedor": nomes_por_id.get(d["assignedById"], "?"),
+            "valor": d["opportunity"],
+            "etapa": d["fase"],
+            "data": f'{d["diasNaFase"]}d na fase',
+        }
+        for d in selecionados
     ]
 
 
@@ -5338,24 +5581,7 @@ def get_funil_scorecard(recorte_selecionado: str) -> dict:
 
     saude_raw = get_funil_scorecard_saude_raw()
     estagnado = get_funil_scorecard_estagnado()
-
-    def _dias_na_fase(entrada_fase) -> int:
-        if entrada_fase is None:
-            return 0
-        if isinstance(entrada_fase, datetime):
-            entrada_fase = entrada_fase.date()
-        elif isinstance(entrada_fase, str):
-            entrada_fase = datetime.fromisoformat(entrada_fase).date()
-        return max((hoje - entrada_fase).days, 0)
-
-    enriquecidos = []
-    for d in saude_raw:
-        dias = _dias_na_fase(d["entradaFase"])
-        perfil = "B" if d["opportunity"] >= 150000 else "A"
-        sla_fase = FUNIL_SCORECARD_SLA.get(d["fase"])
-        sla = sla_fase[perfil] if sla_fase else None
-        fora_do_sla = sla is not None and dias > sla
-        enriquecidos.append({**d, "diasNaFase": dias, "perfil": perfil, "sla": sla, "foraDoSla": fora_do_sla})
+    enriquecidos = _sc_enriquecer_saude(saude_raw, hoje)
 
     def _pct(parte: int, total: int) -> float | None:
         return (parte / total * 100) if total else None
