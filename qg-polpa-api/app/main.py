@@ -48,7 +48,11 @@ app = FastAPI(
 @app.on_event("startup")
 def _iniciar_scheduler() -> None:
     from app.database import _ensure_fato_vendas_peso_liquido_column
-    from app.scheduler import iniciar_scheduler_snapshot_semanal, iniciar_scheduler_tarefas_vencidas
+    from app.scheduler import (
+        iniciar_scheduler_snapshot_semanal,
+        iniciar_scheduler_tarefas_vencidas,
+        iniciar_scheduler_sync_bitrix,
+    )
     _ensure_fato_vendas_peso_liquido_column()
     # O congelamento semanal do forecast (dbo.forecast_snapshots) é compartilhado entre
     # produção e qualquer instância de desenvolvimento apontando pro mesmo banco
@@ -60,6 +64,7 @@ def _iniciar_scheduler() -> None:
     if os.getenv("APP_ENV", "").strip().lower() != "development":
         iniciar_scheduler_snapshot_semanal()
     iniciar_scheduler_tarefas_vencidas()
+    iniciar_scheduler_sync_bitrix()
 
 
 DEFAULT_ALLOWED_ORIGINS = [
@@ -3037,6 +3042,8 @@ def api_create_comentario(payload: ComentarioCreateRequest, request: Request):
 from app.database import (
     get_visao_global_resumo,
     get_visao_global_filtros_disponiveis,
+    list_visao_global_clientes,
+    list_visao_global_cliente_produtos,
 )
 
 
@@ -3054,15 +3061,60 @@ def api_visao_global_resumo(
     meses: list[int] | None = Query(default=None),
     codProdutos: list[int] | None = Query(default=None),
     gruposProduto: list[str] | None = Query(default=None),
-    tipoReceita: str | None = Query(default=None),
+    tipoReceita: list[str] | None = Query(default=None),
     mercados: list[str] | None = Query(default=None),
     projetos: list[str] | None = Query(default=None),
+    codParcs: list[int] | None = Query(default=None),
 ):
-    filtros = {
-        "ano": ano, "meses": meses, "codProdutos": codProdutos, "gruposProduto": gruposProduto,
-        "tipoReceita": tipoReceita, "mercados": mercados, "projetos": projetos,
-    }
+    filtros = _visao_global_filtros_query(ano, meses, codProdutos, gruposProduto, tipoReceita, mercados, projetos, codParcs)
     try:
         return get_visao_global_resumo(filtros)
     except Exception as error:
         raise HTTPException(status_code=500, detail=f"Erro ao buscar visão global: {error}")
+
+
+def _visao_global_filtros_query(
+    ano: int | None, meses: list[int] | None, codProdutos: list[int] | None,
+    gruposProduto: list[str] | None, tipoReceita: list[str] | None,
+    mercados: list[str] | None, projetos: list[str] | None,
+    codParcs: list[int] | None = None,
+) -> dict:
+    return {
+        "ano": ano, "meses": meses, "codProdutos": codProdutos, "gruposProduto": gruposProduto,
+        "tipoReceita": tipoReceita, "mercados": mercados, "projetos": projetos, "codParcs": codParcs,
+    }
+
+
+@app.get("/api/visao-global/clientes", tags=["Visão Global"])
+def api_visao_global_clientes(
+    ano: int | None = Query(default=None),
+    meses: list[int] | None = Query(default=None),
+    codProdutos: list[int] | None = Query(default=None),
+    gruposProduto: list[str] | None = Query(default=None),
+    tipoReceita: list[str] | None = Query(default=None),
+    mercados: list[str] | None = Query(default=None),
+    projetos: list[str] | None = Query(default=None),
+):
+    filtros = _visao_global_filtros_query(ano, meses, codProdutos, gruposProduto, tipoReceita, mercados, projetos)
+    try:
+        return list_visao_global_clientes(filtros)
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Erro ao buscar clientes da visão global: {error}")
+
+
+@app.get("/api/visao-global/clientes/{cod_parc}/produtos", tags=["Visão Global"])
+def api_visao_global_cliente_produtos(
+    cod_parc: int,
+    ano: int | None = Query(default=None),
+    meses: list[int] | None = Query(default=None),
+    codProdutos: list[int] | None = Query(default=None),
+    gruposProduto: list[str] | None = Query(default=None),
+    tipoReceita: list[str] | None = Query(default=None),
+    mercados: list[str] | None = Query(default=None),
+    projetos: list[str] | None = Query(default=None),
+):
+    filtros = _visao_global_filtros_query(ano, meses, codProdutos, gruposProduto, tipoReceita, mercados, projetos)
+    try:
+        return list_visao_global_cliente_produtos(cod_parc, filtros)
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Erro ao buscar produtos do cliente: {error}")

@@ -6529,8 +6529,9 @@ def ensure_qg_notifications_table() -> None:
                     id           INT IDENTITY(1,1) NOT NULL PRIMARY KEY,
                     usuario_id   INT NOT NULL REFERENCES dbo.users(id),
                     tipo         NVARCHAR(30) NOT NULL
-                                 CONSTRAINT CK_qg_notifications_tipo CHECK (tipo IN ('TAREFA_ATRIBUIDA','TAREFA_REATRIBUIDA','TAREFA_VENCIDA')),
-                    task_id      INT NOT NULL REFERENCES dbo.qg_tasks(id),
+                                 CONSTRAINT CK_qg_notifications_tipo CHECK (tipo IN ('TAREFA_ATRIBUIDA','TAREFA_REATRIBUIDA','TAREFA_VENCIDA','SYNC_BITRIX_ATRASADO')),
+                    -- NULL para notificações que não são de uma tarefa (ex.: SYNC_BITRIX_ATRASADO).
+                    task_id      INT NULL REFERENCES dbo.qg_tasks(id),
                     titulo       NVARCHAR(200) NOT NULL,
                     mensagem     NVARCHAR(500) NOT NULL,
                     lida         BIT NOT NULL CONSTRAINT DF_qg_notifications_lida DEFAULT 0,
@@ -6590,16 +6591,129 @@ def ensure_qg_notifications_table() -> None:
             """
             IF EXISTS (
                 SELECT 1 FROM sys.check_constraints
-                WHERE name = 'CK_qg_notifications_tipo' AND definition NOT LIKE '%TAREFA_VENCIDA%'
+                WHERE name = 'CK_qg_notifications_tipo' AND definition NOT LIKE '%SYNC_BITRIX_ATRASADO%'
             )
             BEGIN
                 ALTER TABLE dbo.qg_notifications DROP CONSTRAINT CK_qg_notifications_tipo;
                 ALTER TABLE dbo.qg_notifications ADD CONSTRAINT CK_qg_notifications_tipo
-                    CHECK (tipo IN ('TAREFA_ATRIBUIDA','TAREFA_REATRIBUIDA','TAREFA_VENCIDA'));
+                    CHECK (tipo IN ('TAREFA_ATRIBUIDA','TAREFA_REATRIBUIDA','TAREFA_VENCIDA','SYNC_BITRIX_ATRASADO'));
             END;
             """
         )
         connection.commit()
+
+        # Migração idempotente: task_id passa a aceitar NULL (notificações que não são de
+        # uma tarefa, ex.: SYNC_BITRIX_ATRASADO). ALTER COLUMN em coluna já NULL é no-op
+        # seguro, mas só roda se ainda estiver NOT NULL pra evitar um ALTER desnecessário
+        # a cada chamada.
+        cursor.execute(
+            """
+            IF EXISTS (
+                SELECT 1 FROM sys.columns
+                WHERE object_id = OBJECT_ID('dbo.qg_notifications') AND name = 'task_id' AND is_nullable = 0
+            )
+            BEGIN
+                ALTER TABLE dbo.qg_notifications ALTER COLUMN task_id INT NULL;
+            END;
+            """
+        )
+        connection.commit()
+
+
+# Entidades sincronizadas pelo sync_mssql.py (Polpa Brasil IA, fora deste repo) em
+# dbo.crm_sync_log, e o agendamento real desse processo (07h/12h/15h BRT, ver api.py
+# nesse outro projeto) -- usados só pra saber se o sync atrasou, não pra disparar o sync.
+_BITRIX_SYNC_ENTIDADES_ESPERADAS = (
+    "pipelines", "users", "companies", "deals", "leads", "tasks", "deal_stage_history", "activities",
+)
+_BITRIX_SYNC_HORAS_BRT = (7, 12, 15)
+# Sincronização completa (todas as 8 entidades) leva uns 10-15 min — folga generosa
+# pra não alarmar por uma execução só um pouco mais lenta que o normal.
+_BITRIX_SYNC_GRACE_MINUTOS = 45
+
+
+def _bitrix_sync_ultimo_horario_esperado(agora_utc: datetime) -> datetime:
+    """Horário (UTC) do disparo agendado (07h/12h/15h BRT) mais recente cuja margem de
+    folga já passou -- qualquer entidade NÃO sincronizada desde ESSE disparo está
+    atrasada (a comparação usa o horário do disparo em si, não disparo+folga: a folga só
+    serve pra decidir a partir de quando é justo cobrar, não desloca o que conta como "em
+    dia"). Olha hoje e ontem em BRT pra cobrir corretamente a virada do dia (ex.: às 2h da
+    manhã, o disparo de referência ainda é o das 15h de ontem, não um dos de hoje)."""
+    fuso_brt = timezone(timedelta(hours=-3))
+    agora_brt = agora_utc.astimezone(fuso_brt)
+    disparos = []
+    for dia_offset in (-1, 0):
+        dia = agora_brt.date() + timedelta(days=dia_offset)
+        for hora in _BITRIX_SYNC_HORAS_BRT:
+            disparos.append(datetime(dia.year, dia.month, dia.day, hora, 0, tzinfo=fuso_brt))
+    com_folga_vencida = [d for d in disparos if d + timedelta(minutes=_BITRIX_SYNC_GRACE_MINUTOS) <= agora_brt]
+    return max(com_folga_vencida).astimezone(timezone.utc)
+
+
+def verificar_sync_bitrix_atrasado() -> int:
+    """Varredura periódica (chamada pela thread em app/scheduler.py): se alguma entidade
+    do Bitrix (dbo.crm_sync_log) não sincronizou desde o último horário agendado esperado,
+    notifica os administradores ativos. Deduplicado por (usuário, horário esperado) via
+    dedupe_key -- só notifica de novo quando o PRÓXIMO horário esperado passar e o atraso
+    persistir (não fica repetindo a cada varredura enquanto o mesmo atraso continua)."""
+    ensure_qg_notifications_table()
+    agora_utc = datetime.now(timezone.utc)
+    limite = _bitrix_sync_ultimo_horario_esperado(agora_utc)
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    # synced_at é NVARCHAR (ISO 8601 com offset, gravado por sync_mssql.py) -- MAX() faz
+    # comparação lexicográfica, que só bate com a ordem cronológica real porque o formato é
+    # sempre largura fixa e mesmo offset (+00:00); por isso parseia pra datetime aqui antes
+    # de comparar com `limite`, em vez de comparar strings.
+    cursor.execute("SELECT entity, MAX(synced_at) AS ultimo FROM dbo.crm_sync_log GROUP BY entity")
+    sincronizadas = {}
+    for row in cursor.fetchall():
+        if row.ultimo is None:
+            continue
+        try:
+            sincronizadas[row.entity] = datetime.fromisoformat(row.ultimo)
+        except ValueError:
+            continue
+
+    atrasadas = [
+        e for e in _BITRIX_SYNC_ENTIDADES_ESPERADAS
+        if sincronizadas.get(e) is None or sincronizadas[e] < limite
+    ]
+    if not atrasadas:
+        cursor.close()
+        conn.close()
+        return 0
+
+    cursor.execute("SELECT id FROM dbo.users WHERE role = 'ADMIN' AND ativo = 1")
+    admin_ids = [int(row[0]) for row in cursor.fetchall()]
+
+    limite_brt = limite.astimezone(timezone(timedelta(hours=-3)))
+    mensagem = (
+        f"Não sincronizam desde antes de {limite_brt.strftime('%d/%m %H:%M')} (último disparo agendado): "
+        + ", ".join(atrasadas)
+    )
+    slot_iso = limite.isoformat()
+    criadas = 0
+    for admin_id in admin_ids:
+        dedupe_key = f"sync_bitrix:{admin_id}:{slot_iso}"
+        try:
+            cursor.execute(
+                """
+                INSERT INTO dbo.qg_notifications (usuario_id, tipo, task_id, titulo, mensagem, dedupe_key)
+                VALUES (?, 'SYNC_BITRIX_ATRASADO', NULL, ?, ?, ?)
+                """,
+                [admin_id, "Sincronização do Bitrix atrasada", mensagem, dedupe_key],
+            )
+            conn.commit()
+            criadas += 1
+        except Exception:
+            # dedupe_key já existe — esse admin já foi notificado para este horário esperado.
+            conn.rollback()
+
+    cursor.close()
+    conn.close()
+    return criadas
 
 
 def _insert_notificacao_tarefa(
@@ -7158,16 +7272,22 @@ def _vg_normalize_filtros(filtros: dict | None) -> dict:
         ano = int(filtros["ano"]) if filtros.get("ano") not in (None, "") else VISAO_GLOBAL_ANO_PADRAO
     except (TypeError, ValueError):
         ano = VISAO_GLOBAL_ANO_PADRAO
-    tipo_receita = filtros.get("tipoReceita")
-    tipo_receita = tipo_receita.strip().upper() if isinstance(tipo_receita, str) and tipo_receita.strip() else None
-    if tipo_receita not in VISAO_GLOBAL_TIPO_RECEITA_CARDS:
-        tipo_receita = None
+    # Seleção múltipla de tipo de receita (Venda Firme/Novo Projeto/Forecast) — a tela
+    # tem dois controles independentes pra essa mesma dimensão (os 3 cards clicáveis,
+    # seleção única, e o filtro dropdown, seleção múltipla); o frontend já manda a
+    # união dos dois num único parâmetro `tipoReceita` repetido, então aqui só
+    # normaliza/valida a lista, sem distinguir de onde cada valor veio.
+    tipos_receita = [
+        v.strip().upper()
+        for v in _split_filter(filtros.get("tipoReceita"))
+        if isinstance(v, str) and v.strip().upper() in VISAO_GLOBAL_TIPO_RECEITA_CARDS
+    ]
     return {
         "ano": ano,
         "meses": _split_int_filter(filtros.get("meses")),
         "codProdutos": _split_int_filter(filtros.get("codProdutos")),
         "gruposProduto": _split_filter(filtros.get("gruposProduto")),
-        "tipoReceita": tipo_receita,
+        "tipoReceita": tipos_receita,
         # Seleção múltipla de mercado — tanto pelo filtro dedicado quanto por
         # clique numa linha da tabela (drill-down opcional, reversível; não é o
         # SELETOR fixo que a spec original vetou, que escondia mercados por padrão).
@@ -7175,12 +7295,19 @@ def _vg_normalize_filtros(filtros: dict | None) -> dict:
         # Projeto (Novos Projetos/Recorrentes/Teste Industrial) — permite comparar
         # Orçado x Realizado restrito a essas categorias específicas.
         "projetos": _split_filter(filtros.get("projetos")),
+        # Cliente selecionado na tabela de Detalhamento de Vendas — escopa KPIs,
+        # gráfico mensal e tabela de mercado pra esse cliente (não escopa a própria
+        # tabela de clientes, que precisa continuar navegável).
+        "codParcs": _split_int_filter(filtros.get("codParcs")),
     }
 
 
 def _vg_where_produto_grupo(f: dict, params: list[Any]) -> list[str]:
-    """Cláusulas de produto/grupo/mercado/projeto, comuns a orçamento e
-    realizado (não inclui ano/mês — cada chamador monta o resto)."""
+    """Cláusulas de produto/grupo/mercado/projeto/cliente, comuns a orçamento e
+    realizado (não inclui ano/mês — cada chamador monta o resto). Usada tanto no
+    resumo quanto na evolução mensal — adicionar `codParcs` aqui já propaga o
+    escopo de cliente selecionado (clique na tabela de Detalhamento de Vendas)
+    pros dois automaticamente."""
     parts: list[str] = []
     clause = _build_in_clause("mercado_vendas", f["mercados"], params)
     if clause:
@@ -7196,6 +7323,10 @@ def _vg_where_produto_grupo(f: dict, params: list[Any]) -> list[str]:
         placeholders = ", ".join("?" for _ in f["gruposProduto"])
         parts.append(f"grupo_produto IN ({placeholders})")
         params.extend(f["gruposProduto"])
+    if f["codParcs"]:
+        placeholders = ", ".join("?" for _ in f["codParcs"])
+        parts.append(f"cod_parc IN ({placeholders})")
+        params.extend(f["codParcs"])
     return parts
 
 
@@ -7310,19 +7441,34 @@ def get_visao_global_resumo(filtros: dict | None = None) -> dict:
     )
     realizado_disponivel = _int(cursor.fetchone()[0]) > 0
 
-    tipo_sel = f["tipoReceita"]
+    tipos_sel: list[str] = f["tipoReceita"]
+    _CAMPOS_POR_TIPO = {
+        "VENDA_FIRME": ("vendaFirmeRS", "vendaFirmeKG"),
+        "NOVO_PROJETO": ("novoProjetoRS", "novoProjetoKG"),
+        "FORECAST": ("forecastRS", "forecastKG"),
+    }
 
     def _realizado_ativo(r: dict) -> tuple[float, float]:
-        """Retorna (RS, KG) do 'Realizado' ativo, conforme o card selecionado.
-        Sem seleção: Vendas Firmes + Novos Projetos (Forecast nunca entra por
-        padrão, pois é pipeline não confirmado — ver nota no topo do arquivo)."""
-        if tipo_sel == "VENDA_FIRME":
-            return r["vendaFirmeRS"], r["vendaFirmeKG"]
-        if tipo_sel == "NOVO_PROJETO":
-            return r["novoProjetoRS"], r["novoProjetoKG"]
-        if tipo_sel == "FORECAST":
-            return r["forecastRS"], r["forecastKG"]
-        return r["vendaFirmeRS"] + r["novoProjetoRS"], r["vendaFirmeKG"] + r["novoProjetoKG"]
+        """Retorna (RS, KG) do 'Realizado' ativo, somando os tipos selecionados (cards
+        clicáveis + filtro dropdown, já unidos em `tipos_sel` por _vg_normalize_filtros).
+        Sem seleção: Vendas Firmes + Novos Projetos (Forecast nunca entra por padrão,
+        pois é pipeline não confirmado — ver nota no topo do arquivo)."""
+        if not tipos_sel:
+            return r["vendaFirmeRS"] + r["novoProjetoRS"], r["vendaFirmeKG"] + r["novoProjetoKG"]
+        campos = [_CAMPOS_POR_TIPO[tipo] for tipo in tipos_sel]
+        return sum(r[campo_rs] for campo_rs, _ in campos), sum(r[campo_kg] for _, campo_kg in campos)
+
+    # "Previsão Total" soma os tipos selecionados (cards + dropdown); sem seleção,
+    # soma os 3 (Vendas Firmes + Novos Projetos + Forecast) — único ponto em que o
+    # default difere de _realizado_ativo (que exclui Forecast por padrão).
+    tipos_previsao = tipos_sel or list(VISAO_GLOBAL_TIPO_RECEITA_CARDS)
+    _campos_previsao = [_CAMPOS_POR_TIPO[tipo] for tipo in tipos_previsao]
+
+    def _previsao_total(r: dict) -> tuple[float, float]:
+        return (
+            sum(r[campo_rs] for campo_rs, _ in _campos_previsao),
+            sum(r[campo_kg] for _, campo_kg in _campos_previsao),
+        )
 
     cursor.close()
     conn.close()
@@ -7351,11 +7497,7 @@ def get_visao_global_resumo(filtros: dict | None = None) -> dict:
         total_orcamento_kg += o["orcamentoKG"]
         total_orcamento_volume += o["orcamentoVolume"]
         realizado_rs, realizado_kg = _realizado_ativo(r)
-        # "Previsão Total" = soma incondicional dos 3 grupos (Vendas Firmes + Novos
-        # Projetos + Forecast) — mesmo conceito do card "Previsão Total" no topo da
-        # tela, independe do card de tipo selecionado.
-        previsao_total_rs = r["vendaFirmeRS"] + r["novoProjetoRS"] + r["forecastRS"]
-        previsao_total_kg = r["vendaFirmeKG"] + r["novoProjetoKG"] + r["forecastKG"]
+        previsao_total_rs, previsao_total_kg = _previsao_total(r)
         if realizado_disponivel:
             total_realizado_rs += realizado_rs
             total_realizado_kg += realizado_kg
@@ -7398,8 +7540,13 @@ def get_visao_global_resumo(filtros: dict | None = None) -> dict:
 
     linhas.sort(key=lambda l: l["orcamentoRS"], reverse=True)
 
-    total_previsao_total_rs = (total_venda_firme_rs + total_novo_projeto_rs + total_forecast_rs) if realizado_disponivel else None
-    total_previsao_total_kg = (total_venda_firme_kg + total_novo_projeto_kg + total_forecast_kg) if realizado_disponivel else None
+    _totais_por_tipo = {
+        "VENDA_FIRME": (total_venda_firme_rs, total_venda_firme_kg),
+        "NOVO_PROJETO": (total_novo_projeto_rs, total_novo_projeto_kg),
+        "FORECAST": (total_forecast_rs, total_forecast_kg),
+    }
+    total_previsao_total_rs = sum(_totais_por_tipo[t][0] for t in tipos_previsao) if realizado_disponivel else None
+    total_previsao_total_kg = sum(_totais_por_tipo[t][1] for t in tipos_previsao) if realizado_disponivel else None
 
     total_linha = {
         "mercado": "TOTAL",
@@ -7425,10 +7572,14 @@ def get_visao_global_resumo(filtros: dict | None = None) -> dict:
     kpis = {
         "orcamentoTotalRS": total_orcamento_rs,
         "realizadoTotalRS": total_realizado_rs if realizado_disponivel else None,
-        # Desvio R$/Atingimento/Realizado KG usam a "Previsão Total" (Vendas Firmes +
-        # Novos Projetos + Forecast) como base de comparação com o Orçado — mesmo
-        # conceito do card "Previsão Total" e das colunas "Previsão Total" da tabela
-        # por mercado, e não mais o Realizado filtrado pelo card de tipo selecionado.
+        # Desvio R$/Atingimento/Realizado KG/Previsão Total usam a mesma base: soma dos
+        # tipos selecionados (cards + dropdown), ou os 3 juntos sem seleção — mesmo
+        # conceito das colunas "Previsão Total" da tabela por mercado. "Previsão Total"
+        # explícito aqui pro frontend não precisar recalcular (evita ficar sempre nos
+        # 3 tipos, ignorando o filtro, se o frontend somasse vendaFirme+novoProjeto+
+        # forecast na unha).
+        "previsaoTotalRS": total_previsao_total_rs,
+        "previsaoTotalKG": total_previsao_total_kg,
         "desvioRS": (total_previsao_total_rs - total_orcamento_rs) if realizado_disponivel else None,
         "atingimentoPct": (total_previsao_total_rs / total_orcamento_rs) if (realizado_disponivel and total_orcamento_rs) else None,
         "orcamentoKG": total_orcamento_kg,
@@ -7436,7 +7587,7 @@ def get_visao_global_resumo(filtros: dict | None = None) -> dict:
         "vendaFirmeTotalRS": total_venda_firme_rs if realizado_disponivel else None,
         "novoProjetoTotalRS": total_novo_projeto_rs if realizado_disponivel else None,
         "forecastTotalRS": total_forecast_rs if realizado_disponivel else None,
-        "tipoReceitaSelecionado": tipo_sel,
+        "tipoReceitaSelecionados": tipos_sel,
     }
 
     return {
@@ -7456,6 +7607,167 @@ def get_visao_global_resumo(filtros: dict | None = None) -> dict:
             "mercadosSemInformacao": [m for m in todos_mercados if m == "Sem mercado informado"],
         },
     }
+
+
+# Tipo de receita selecionado (cards + dropdown, já unidos por _vg_normalize_filtros)
+# -> valores reais de tipo_receita no banco. "VENDA_FIRME" é um bucket que já inclui
+# DEVOLUCAO (mesmo critério usado em get_visao_global_resumo/_realizado_ativo).
+_VG_TIPO_RECEITA_SQL = {
+    "VENDA_FIRME": ("VENDA_FIRME", "DEVOLUCAO"),
+    "NOVO_PROJETO": ("NOVO_PROJETO",),
+    "FORECAST": ("FORECAST",),
+}
+
+
+def _vg_tipos_receita_sql(tipos_sel: list[str]) -> tuple[str, ...]:
+    """Sem seleção, os 3 tipos (mesmo default de "Previsão Total"/_previsao_total em
+    get_visao_global_resumo — o Detalhamento de Vendas precisa bater com o que os
+    cards do topo mostram, não com o default mais restrito de _realizado_ativo, que
+    é um conceito interno diferente e não aparece mais em nenhuma coluna da tela)."""
+    tipos = tipos_sel or list(VISAO_GLOBAL_TIPO_RECEITA_CARDS)
+    sql_types: list[str] = []
+    for tipo in tipos:
+        sql_types.extend(_VG_TIPO_RECEITA_SQL[tipo])
+    return tuple(dict.fromkeys(sql_types))
+
+
+def list_visao_global_clientes(filtros: dict | None = None) -> list[dict]:
+    """Detalhamento de vendas por cliente — mesmo nível de detalhe de
+    list_historico_clientes, mas com os filtros/regras da Visão Global: sem
+    restrição de mercado, tipo_receita conforme a seleção combinada (cards +
+    dropdown) em vez de fixo em Venda Firme, e valor inclui vlr_st (mesma fórmula
+    de 'Realizado' usada no resto da tela)."""
+    f = _vg_normalize_filtros(filtros)
+    tipos_sql = _vg_tipos_receita_sql(f["tipoReceita"])
+
+    params: list[Any] = [f["ano"]]
+    parts = [
+        "YEAR(dt_entrega_cliente) = ?",
+        f"tipo_receita IN ({', '.join('?' for _ in tipos_sql)})",
+        "(cod_top IS NULL OR cod_top NOT IN (1023, 1152, 1022, 3031, 1171))",
+        "([top] IS NULL OR [top] NOT LIKE '%ESTOQUE MINIM%')",
+        f"([top] IS NULL OR [top] NOT IN ({', '.join('?' for _ in TOPS_EXCLUIDOS_DA_VENDA)}))",
+    ]
+    params.extend(tipos_sql)
+    params.extend(TOPS_EXCLUIDOS_DA_VENDA)
+    if f["meses"]:
+        placeholders = ", ".join("?" for _ in f["meses"])
+        parts.append(f"MONTH(dt_entrega_cliente) IN ({placeholders})")
+        params.extend(f["meses"])
+    # dim_cliente não tem colunas em comum com mercado_vendas/projeto/cod_produto/
+    # grupo_produto (só cod_parc, qualificado abaixo), então as cláusulas bare de
+    # _vg_where_produto_grupo não ficam ambíguas aqui.
+    parts.extend(_vg_where_produto_grupo(f, params))
+    where = "WHERE " + " AND ".join(parts)
+
+    rows = fetch_all(
+        f"""
+        SELECT
+            fato_vendas.cod_parc AS codParc,
+            COALESCE(MAX(dc.razao_social), MAX(fato_vendas.RAZAOSOCIAL)) AS razaoSocial,
+            COALESCE(SUM(valor_pendente + COALESCE(vlr_st, 0)), 0) AS valor,
+            COALESCE(SUM(peso_liquido), 0) AS volume,
+            CASE WHEN COALESCE(SUM(peso_liquido), 0) > 0
+                THEN SUM(valor_pendente + COALESCE(vlr_st, 0)) / SUM(peso_liquido)
+                ELSE 0 END AS precoMedio,
+            COUNT(DISTINCT cod_produto) AS qtdProdutos,
+            MAX(dt_entrega_cliente) AS ultimaCompra
+        FROM dbo.fato_vendas
+        LEFT JOIN dbo.dim_cliente dc ON fato_vendas.cod_parc = dc.cod_parc
+        {where}
+        GROUP BY fato_vendas.cod_parc
+        ORDER BY SUM(valor_pendente + COALESCE(vlr_st, 0)) DESC
+        """,
+        params,
+    )
+    total_valor = sum(_number(r.get("valor")) for r in rows)
+    total_volume = sum(_number(r.get("volume")) for r in rows)
+    return [
+        {
+            "codParc": _int(r.get("codParc")),
+            "razaoSocial": r.get("razaoSocial") or "",
+            "valor": _number(r.get("valor")),
+            "volume": _number(r.get("volume")),
+            "precoMedio": _number(r.get("precoMedio")),
+            "qtdProdutos": _int(r.get("qtdProdutos")),
+            "pctValor": (_number(r.get("valor")) / total_valor * 100) if total_valor > 0 else 0,
+            "pctVolume": (_number(r.get("volume")) / total_volume * 100) if total_volume > 0 else 0,
+            "ultimaCompra": _date_yyyy_mm_dd(r.get("ultimaCompra")),
+        }
+        for r in rows
+    ]
+
+
+def list_visao_global_cliente_produtos(cod_parc: int, filtros: dict | None = None) -> list[dict]:
+    """Produtos de um cliente específico, mesmos filtros/regras de
+    list_visao_global_clientes. Usa alias `fv` e qualifica mercado/projeto/
+    cod_produto/grupo_produto explicitamente (em vez de reaproveitar
+    _vg_where_produto_grupo) porque o JOIN com dim_produto traz cod_produto e
+    grupo_produto também, e colunas bare ficariam ambíguas entre as duas tabelas."""
+    f = _vg_normalize_filtros(filtros)
+    tipos_sql = _vg_tipos_receita_sql(f["tipoReceita"])
+
+    params: list[Any] = [f["ano"], cod_parc]
+    parts = [
+        "YEAR(fv.dt_entrega_cliente) = ?",
+        "fv.cod_parc = ?",
+        f"fv.tipo_receita IN ({', '.join('?' for _ in tipos_sql)})",
+        "(fv.cod_top IS NULL OR fv.cod_top NOT IN (1023, 1152, 1022, 3031, 1171))",
+        "(fv.[top] IS NULL OR fv.[top] NOT LIKE '%ESTOQUE MINIM%')",
+        f"(fv.[top] IS NULL OR fv.[top] NOT IN ({', '.join('?' for _ in TOPS_EXCLUIDOS_DA_VENDA)}))",
+    ]
+    params.extend(tipos_sql)
+    params.extend(TOPS_EXCLUIDOS_DA_VENDA)
+    if f["meses"]:
+        placeholders = ", ".join("?" for _ in f["meses"])
+        parts.append(f"MONTH(fv.dt_entrega_cliente) IN ({placeholders})")
+        params.extend(f["meses"])
+    clause = _build_in_clause("fv.mercado_vendas", f["mercados"], params)
+    if clause:
+        parts.append(clause)
+    clause = _build_in_clause("fv.projeto", f["projetos"], params)
+    if clause:
+        parts.append(clause)
+    if f["codProdutos"]:
+        placeholders = ", ".join("?" for _ in f["codProdutos"])
+        parts.append(f"fv.cod_produto IN ({placeholders})")
+        params.extend(f["codProdutos"])
+    if f["gruposProduto"]:
+        placeholders = ", ".join("?" for _ in f["gruposProduto"])
+        parts.append(f"fv.grupo_produto IN ({placeholders})")
+        params.extend(f["gruposProduto"])
+    where = "WHERE " + " AND ".join(parts)
+
+    rows = fetch_all(
+        f"""
+        SELECT
+            CAST(fv.cod_produto AS NVARCHAR(50)) AS codProduto,
+            COALESCE(MAX(dp.nome_produto), MAX(fv.nome_produto), CAST(fv.cod_produto AS NVARCHAR(50))) AS nomeProduto,
+            COALESCE(SUM(fv.peso_liquido), 0) AS volume,
+            COALESCE(SUM(fv.valor_pendente + COALESCE(fv.vlr_st, 0)), 0) AS valor,
+            CASE WHEN COALESCE(SUM(fv.peso_liquido), 0) > 0
+                THEN COALESCE(SUM(fv.valor_pendente + COALESCE(fv.vlr_st, 0)), 0) / SUM(fv.peso_liquido)
+                ELSE 0 END AS precoMedio,
+            MAX(fv.dt_entrega_cliente) AS dtUltimaCompra
+        FROM dbo.fato_vendas fv
+        LEFT JOIN dbo.dim_produto dp ON fv.cod_produto = dp.cod_produto
+        {where}
+        GROUP BY fv.cod_produto
+        ORDER BY volume DESC
+        """,
+        params,
+    )
+    return [
+        {
+            "codProduto": str(r.get("codProduto") or ""),
+            "nomeProduto": r.get("nomeProduto") or str(r.get("codProduto") or ""),
+            "volume": _number(r.get("volume")),
+            "valor": _number(r.get("valor")),
+            "precoMedio": _number(r.get("precoMedio")),
+            "dtUltimaCompra": _date_yyyy_mm_dd(r.get("dtUltimaCompra")),
+        }
+        for r in rows
+    ]
 
 
 def _vg_evolucao_mensal(f: dict, realizado_disponivel: bool) -> list[dict]:

@@ -2,7 +2,12 @@ import threading
 import time
 from datetime import datetime, timedelta
 
-from app.database import criar_forecast_snapshot, get_snapshot_datas, notificar_tarefas_vencidas
+from app.database import (
+    criar_forecast_snapshot,
+    get_snapshot_datas,
+    notificar_tarefas_vencidas,
+    verificar_sync_bitrix_atrasado,
+)
 
 # Quarta-feira às 08h30 (datetime.weekday(): Segunda=0 ... Quarta=2)
 TARGET_WEEKDAY = 2
@@ -65,4 +70,28 @@ def iniciar_scheduler_tarefas_vencidas() -> None:
     """Inicia uma thread em segundo plano que notifica o responsável quando uma
     tarefa passa do prazo sem ser concluída."""
     thread = threading.Thread(target=_loop_tarefas_vencidas, daemon=True, name="tarefas-vencidas-scheduler")
+    thread.start()
+
+
+# Checa se a sincronização do Bitrix (processo externo, fora deste repo — ver
+# dbo.crm_sync_log) está atrasada em relação ao agendamento esperado (07h/12h/15h BRT).
+# Intervalo mais curto que o das tarefas vencidas: um atraso de sync é mais urgente
+# (os dados ficam visivelmente errados nas telas de CRM enquanto durar) e a notificação
+# já é deduplicada por horário esperado, então checar com frequência não gera spam.
+INTERVALO_CHECAGEM_SYNC_BITRIX_SEGUNDOS = 30 * 60
+
+
+def _loop_sync_bitrix() -> None:
+    while True:
+        try:
+            verificar_sync_bitrix_atrasado()
+        except Exception as exc:
+            print(f"[scheduler] Falha ao verificar sync do Bitrix: {exc}")
+        time.sleep(INTERVALO_CHECAGEM_SYNC_BITRIX_SEGUNDOS)
+
+
+def iniciar_scheduler_sync_bitrix() -> None:
+    """Inicia uma thread em segundo plano que avisa os administradores quando a
+    sincronização do Bitrix (dbo.crm_sync_log) fica atrasada."""
+    thread = threading.Thread(target=_loop_sync_bitrix, daemon=True, name="sync-bitrix-scheduler")
     thread.start()
